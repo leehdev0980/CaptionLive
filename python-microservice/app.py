@@ -10,8 +10,13 @@ def process():
     """
     audio_bytes = request.data
     
-    if not audio_bytes:
-        return jsonify({"error": "No audio data received"}), 400
+    # Safety check: ignore empty or too‑small chunks (valid WAV header is at least 44 bytes)
+    if not audio_bytes or len(audio_bytes) < 44:
+        return jsonify({
+            "english": "",
+            "processing_time_seconds": 0
+        })
+
     
     try:
         result = transcribe_audio(audio_bytes)
@@ -26,4 +31,4 @@ def ping():
 
 if __name__ == '__main__':
     print("Starting Python microservice on port 5001...")
-    app.run(host='0.0.0.0', port=5001, threaded=False)
+    app.run(host='0.0.0.0', port=5001, threaded=True)

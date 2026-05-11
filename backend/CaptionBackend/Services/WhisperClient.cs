@@ -20,7 +20,7 @@ public class WhisperClient
     {
         // Prepare the request body as raw bytes with the correct MIME type
         using var content = new ByteArrayContent(audioBytes);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/webm");
+        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
 
         // Call the Python microservice
         var response = await _httpClient.PostAsync("http://localhost:5001/process", content);

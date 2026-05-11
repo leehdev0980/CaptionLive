@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as signalR from '@microsoft/signalr';
-import AudioRecorder from './components/AudioRecorder';
+import AudioRecorder from './components/AudioRecorderPcm';
 
 function App() {
   const [captions, setCaptions] = useState([]);
@@ -30,16 +30,17 @@ function App() {
 
   // Send each audio chunk from AudioRecorder to the .NET backend
   const handleChunkReady = useCallback(async (audioBlob, chunkId) => {
-    const formData = new FormData();
-    formData.append('audio', audioBlob, `chunk_${chunkId}.webm`);
-    try {
-      await fetch('http://localhost:5260/api/audio/upload', {
-        method: 'POST',
-        body: formData
-      });
-    } catch (err) {
-      console.error(`Error sending chunk ${chunkId}:`, err);
-    }
+  const formData = new FormData();
+  formData.append('audio', audioBlob, `chunk_${chunkId}.wav`);
+
+  try {
+    await fetch('http://localhost:5260/api/audio/upload', {
+      method: 'POST',
+      body: formData
+    });
+  } catch (err) {
+    console.error('Upload error:', err);
+  }
   }, []);
 
   return (

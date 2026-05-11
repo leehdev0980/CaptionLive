@@ -1,4 +1,5 @@
 using CaptionBackend.Hubs;
+using CaptionBackend.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -20,7 +21,7 @@ builder.Services.AddControllers();
 // Register WhisperClient with a typed HttpClient
 builder.Services.AddHttpClient<WhisperClient>(client =>
 {
-    client.Timeout = TimeSpan.FromSeconds(10);
+    client.Timeout = TimeSpan.FromSeconds(30);
 });
 
 var app = builder.Build();
