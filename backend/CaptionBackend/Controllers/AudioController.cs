@@ -20,31 +20,22 @@ public class AudioController : ControllerBase
     }
 
     [HttpPost("upload")]
-    public async Task<IActionResult> UploadAudio(IFormFile audio)
+    public async Task<IActionResult> UploadAudio(IFormFile audio, [FromQuery] bool translate = false)
     {
          if (audio == null || audio.Length == 0)
             return BadRequest("No audio data");
 
-        try
-        {
-            // Read the uploaded file into memory
-            using var ms = new MemoryStream();
-            await audio.CopyToAsync(ms);
-            var bytes = ms.ToArray();
+        // Read the uploaded file into memory
+        using var ms = new MemoryStream();
+        await audio.CopyToAsync(ms);
+        var bytes = ms.ToArray();
 
-            // Call Python transcription service
-            var englishText = await _whisperClient.TranscribeAsync(bytes);
-            Console.WriteLine($"Transcription: {englishText}");
+        // Call Python transcription service
+        var (english, swahili) = await _whisperClient.TranscribeAsync(bytes, translate);
 
-            // Broadcast to all connected React clients via SignalR
-            await _hubContext.Clients.All.SendAsync("ReceiveCaption", englishText);
+        // Broadcast to all connected React clients via SignalR
+        await _hubContext.Clients.All.SendAsync("ReceiveCaption", english, swahili);
 
-            return Ok(new { text = englishText });
-        }
-        catch (HttpRequestException ex)
-        {
-            Console.WriteLine($"Python service error: {ex.Message}");
-            return StatusCode(500, "Transcription service unavailable");
-        }
+        return Ok(new { english, swahili });
     }
 }
