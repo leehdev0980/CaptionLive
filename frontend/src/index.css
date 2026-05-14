@@ -1,45 +1,48 @@
 @import "tailwindcss";
 
 /* ========================================
-   CaptionLive - Premium Dark Theme
+   CaptionLive - Broadcast Operations Theme
+   Professional Production Console Aesthetic
    ======================================== */
 
 :root {
-  /* Core Colors */
-  --background: 222 15% 8%;
-  --foreground: 210 20% 95%;
+  /* Core Dark Surfaces - Broadcast Grade */
+  --background: 220 18% 6%;
+  --foreground: 210 20% 92%;
   
-  /* Card Surfaces */
-  --card: 222 15% 10%;
-  --card-foreground: 210 20% 95%;
+  /* Panel Surfaces */
+  --card: 220 16% 9%;
+  --card-foreground: 210 20% 92%;
   
   /* Muted Surfaces */
-  --muted: 222 15% 14%;
-  --muted-foreground: 215 15% 60%;
+  --muted: 220 16% 12%;
+  --muted-foreground: 215 12% 55%;
   
-  /* Primary Accent - Cyan/Blue */
-  --primary: 195 90% 50%;
-  --primary-foreground: 222 15% 8%;
+  /* Primary Accent - Broadcast Cyan */
+  --primary: 188 95% 48%;
+  --primary-foreground: 220 18% 6%;
   
-  /* Secondary Accent */
-  --secondary: 222 15% 16%;
-  --secondary-foreground: 210 20% 90%;
+  /* Secondary */
+  --secondary: 220 16% 14%;
+  --secondary-foreground: 210 20% 88%;
   
-  /* Accent - Soft Cyan */
-  --accent: 195 70% 45%;
-  --accent-foreground: 222 15% 8%;
+  /* Accent - Operational Amber */
+  --accent: 38 92% 55%;
+  --accent-foreground: 220 18% 6%;
   
   /* Borders */
-  --border: 222 15% 18%;
-  --ring: 195 90% 50%;
+  --border: 220 16% 16%;
+  --border-bright: 220 16% 22%;
+  --ring: 188 95% 48%;
   
-  /* Status Colors */
-  --success: 152 70% 45%;
+  /* Status Colors - Broadcast Standard */
+  --success: 152 70% 42%;
   --warning: 38 92% 55%;
-  --destructive: 0 72% 55%;
+  --destructive: 0 72% 52%;
+  --live: 0 85% 55%;
   
-  /* Radius */
-  --radius: 1rem;
+  /* Radius - Sharp for broadcast */
+  --radius: 0.375rem;
   
   /* Typography */
   --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
@@ -66,57 +69,79 @@ html {
 body {
   min-height: 100vh;
   background: hsl(var(--background));
+  overflow: hidden;
 }
 
-/* Scrollbar Styling */
+/* Broadcast Scrollbar */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 6px;
+  height: 6px;
 }
 
 ::-webkit-scrollbar-track {
-  background: hsl(var(--muted));
-  border-radius: 4px;
+  background: hsl(var(--background));
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(var(--border));
-  border-radius: 4px;
+  background: hsl(var(--border-bright));
+  border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(var(--muted-foreground) / 0.5);
+  background: hsl(var(--muted-foreground) / 0.4);
 }
 
-/* Glassmorphism Utilities */
-.glass {
-  background: hsl(var(--card) / 0.7);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+/* Broadcast Panel Styles */
+.broadcast-panel {
+  background: hsl(var(--card));
+  border: 1px solid hsl(var(--border));
 }
 
-.glass-subtle {
-  background: hsl(var(--card) / 0.4);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
-}
-
-/* Glow Effects */
-.glow-primary {
-  box-shadow: 0 0 20px hsl(var(--primary) / 0.3);
-}
-
-.glow-accent {
-  box-shadow: 0 0 15px hsl(var(--accent) / 0.2);
+.broadcast-panel-header {
+  background: hsl(var(--muted));
+  border-bottom: 1px solid hsl(var(--border));
+  padding: 0.5rem 0.75rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: hsl(var(--muted-foreground));
 }
 
 /* Focus States */
 *:focus-visible {
-  outline: 2px solid hsl(var(--ring));
-  outline-offset: 2px;
+  outline: 1px solid hsl(var(--ring));
+  outline-offset: 1px;
 }
 
-/* Smooth Transitions */
-.transition-smooth {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+/* Live Indicator Pulse */
+@keyframes live-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.animate-live-pulse {
+  animation: live-pulse 1s ease-in-out infinite;
+}
+
+/* Waveform Animation */
+@keyframes waveform-bar {
+  0%, 100% { transform: scaleY(0.3); }
+  50% { transform: scaleY(1); }
+}
+
+/* Timeline marker animation */
+@keyframes timeline-marker {
+  0% { left: 0%; }
+  100% { left: 100%; }
+}
+
+/* Emergency button glow */
+@keyframes emergency-glow {
+  0%, 100% { box-shadow: 0 0 8px hsl(var(--destructive) / 0.4); }
+  50% { box-shadow: 0 0 16px hsl(var(--destructive) / 0.6); }
+}
+
+.emergency-glow {
+  animation: emergency-glow 1.5s ease-in-out infinite;
 }
