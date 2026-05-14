@@ -1,19 +1,28 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as signalR from '@microsoft/signalr';
-import DashboardLayout from './components/layout/DashboardLayout';
-import LiveSessionView from './components/workspace/LiveSessionView';
+import CinematicCaptionDisplay from './components/CinematicCaptionDisplay';
 import AudioRecorder from './components/AudioRecorderPcm';
 
 function App() {
   const [captions, setCaptions] = useState([]);
-  const [translate, setTranslate] = useState(false);
+  const [translate, setTranslate] = useState(true);
   const [isRecording, setIsRecording] = useState(false);
+  const [sessionStart, setSessionStart] = useState(null);
+  const [currentTime, setCurrentTime] = useState("");
   const connectionRef = useRef(null);
-  const translateRef = useRef(false);
+  const translateRef = useRef(true);
   const recorderRef = useRef(null);
 
   // Keep translate ref in sync for use in fetch callback
   useEffect(() => { translateRef.current = translate; }, [translate]);
+
+  // Update timestamp
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setCurrentTime(new Date().toLocaleTimeString());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   // Set up SignalR connection for receiving captions
   useEffect(() => {
@@ -50,17 +59,26 @@ function App() {
   }, []);
 
   const handleToggleRecording = useCallback(() => {
-    setIsRecording(prev => !prev);
-    // The AudioRecorder component handles the actual recording logic
-    // This state is for UI feedback
+    setIsRecording(prev => {
+      if (!prev) {
+        setSessionStart(new Date());
+      }
+      return !prev;
+    });
   }, []);
 
   const handleToggleTranslate = useCallback(() => {
     setTranslate(prev => !prev);
   }, []);
 
+  // Get the latest caption
+  const latest = captions.length > 0 ? captions[captions.length - 1] : null;
+
+  // Calculate confidence (mock for now - would come from backend)
+  const confidence = latest ? 0.92 + Math.random() * 0.07 : 0.95;
+
   return (
-    <DashboardLayout>
+    <div className="min-h-screen bg-[hsl(var(--background))] flex items-center justify-center p-4 md:p-8">
       {/* Hidden AudioRecorder - maintains original functionality */}
       <div className="hidden">
         <AudioRecorder 
@@ -69,16 +87,21 @@ function App() {
         />
       </div>
 
-      {/* Live Session View */}
-      <LiveSessionView
-        captions={captions}
+      {/* Premium Cinematic Caption Display */}
+      <CinematicCaptionDisplay
+        primaryText={latest?.english || ""}
+        translatedText={latest?.swahili || ""}
         isRecording={isRecording}
         translateEnabled={translate}
         onToggleRecording={handleToggleRecording}
         onToggleTranslate={handleToggleTranslate}
-        isLive={true}
+        confidence={confidence}
+        latency={120}
+        speakerName="Speaker 1"
+        timestamp={currentTime}
+        className="w-full max-w-6xl"
       />
-    </DashboardLayout>
+    </div>
   );
 }
 
