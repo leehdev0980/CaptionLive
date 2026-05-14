@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import * as signalR from '@microsoft/signalr';
 import CinematicCaptionDisplay from './components/CinematicCaptionDisplay';
+import TranscriptTimeline from './components/TranscriptTimeline';
 import AudioRecorder from './components/AudioRecorderPcm';
 
 function App() {
@@ -78,7 +79,7 @@ function App() {
   const confidence = latest ? 0.92 + Math.random() * 0.07 : 0.95;
 
   return (
-    <div className="min-h-screen bg-[hsl(var(--background))] flex items-center justify-center p-4 md:p-8">
+    <div className="min-h-screen bg-[hsl(var(--background))] p-4 md:p-6 lg:p-8">
       {/* Hidden AudioRecorder - maintains original functionality */}
       <div className="hidden">
         <AudioRecorder 
@@ -87,20 +88,34 @@ function App() {
         />
       </div>
 
-      {/* Premium Cinematic Caption Display */}
-      <CinematicCaptionDisplay
-        primaryText={latest?.english || ""}
-        translatedText={latest?.swahili || ""}
-        isRecording={isRecording}
-        translateEnabled={translate}
-        onToggleRecording={handleToggleRecording}
-        onToggleTranslate={handleToggleTranslate}
-        confidence={confidence}
-        latency={120}
-        speakerName="Speaker 1"
-        timestamp={currentTime}
-        className="w-full max-w-6xl"
-      />
+      {/* Main Content - Split Layout */}
+      <div className="max-w-[1800px] mx-auto h-[calc(100vh-2rem)] md:h-[calc(100vh-3rem)] lg:h-[calc(100vh-4rem)] flex flex-col lg:flex-row gap-6">
+        {/* Left Panel - Cinematic Caption Display */}
+        <div className="flex-1 flex items-center justify-center lg:min-w-0">
+          <CinematicCaptionDisplay
+            primaryText={latest?.english || ""}
+            translatedText={latest?.swahili || ""}
+            isRecording={isRecording}
+            translateEnabled={translate}
+            onToggleRecording={handleToggleRecording}
+            onToggleTranslate={handleToggleTranslate}
+            confidence={confidence}
+            latency={120}
+            speakerName="Speaker 1"
+            timestamp={currentTime}
+            className="w-full max-w-4xl"
+          />
+        </div>
+
+        {/* Right Panel - Transcript Timeline */}
+        <div className="lg:w-[480px] xl:w-[520px] shrink-0 h-full min-h-[400px] lg:min-h-0">
+          <TranscriptTimeline 
+            captions={captions}
+            currentSessionId="session-1"
+            className="h-full"
+          />
+        </div>
+      </div>
     </div>
   );
 }
