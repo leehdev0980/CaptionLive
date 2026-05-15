@@ -21,13 +21,14 @@ builder.Services.AddControllers();
 // Register WhisperClient with a typed HttpClient
 builder.Services.AddHttpClient<WhisperClient>(client =>
 {
-    client.Timeout = TimeSpan.FromSeconds(30);
+    client.Timeout = TimeSpan.FromSeconds(60);
 });
 
 var app = builder.Build();
 
 app.UseCors();
 app.MapControllers();
+app.UseWebSockets();
 app.MapHub<CaptionHub>("/captionHub");
 
 app.Run();
