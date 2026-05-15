@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify
 from stt import transcribe_audio
+from translate import translate_to_swahili
 
 app = Flask(__name__)
 
@@ -14,15 +15,27 @@ def process():
     if not audio_bytes or len(audio_bytes) < 44:
         return jsonify({
             "english": "",
+            "swahili": "",
             "processing_time_seconds": 0
         })
+    
+    should_translate = request.headers.get('X-Translate', 'false').lower() == 'true'
 
     
     try:
         result = transcribe_audio(audio_bytes)
-        return jsonify(result)
+        english = result["english"]
+        swahili = ""
+        if should_translate and english:
+            swahili = translate_to_swahili(english)
+
+        return jsonify({
+            "english": english,
+            "swahili": swahili,
+            "processing_time_seconds": result["processing_time_seconds"]
+        })
     except Exception as e:
-        print(f"Processing error: {str(e)}")
+        print(f"Processing error: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/ping', methods=['GET'])
