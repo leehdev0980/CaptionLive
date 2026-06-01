@@ -1,123 +1,479 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as signalR from '@microsoft/signalr';
-import AudioRecorder from './components/AudioRecorderPcm';
 
-function App() {
-  const [captions, setCaptions] = useState([]);
-  const [translate, setTranslate] = useState(false);
-  const connectionRef = useRef(null);
-  const translateRef = useRef(false);
+import Homepage from './pages/Homepage';
+import ProcessingView from './pages/ProcessingView';
+import Workstation from './pages/Workstation';
 
-  // Keep translate ref in sync for use in fetch callback
-  useEffect(() => { translateRef.current = translate; }, [translate]);
+import { useAudioAnalyzer } from './hooks/useAudioAnalyzer';
+import { useHistory } from './hooks/useHistory';
 
-  // Set up SignalR connection for receiving captions
+const API_BASE = 'http://localhost:5260';
+const SUPPORTED_MEDIA_EXTENSIONS = ['.wav', '.mp3', '.webm', '.mp4', '.m4a', '.ogg'];
+
+function isSupportedUrl(value) {
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.toLowerCase();
+    return SUPPORTED_MEDIA_EXTENSIONS.some((extension) => pathname.endsWith(extension));
+  } catch {
+    return false;
+  }
+}
+
+function isSupportedFile(file) {
+  const lowerName = file.name.toLowerCase();
+  return SUPPORTED_MEDIA_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+}
+
+function metadataValue(metadata, camelName, pascalName, fallback = '') {
+  if (!metadata) return fallback;
+  return metadata[camelName] ?? metadata[pascalName] ?? fallback;
+}
+
+function normalizeMetadata(metadata = {}) {
+  return {
+    confidence: Number(metadataValue(metadata, 'confidence', 'Confidence', 0)) || 0,
+    status: metadataValue(metadata, 'status', 'Status', 'accepted') || 'accepted',
+    rejectionReason: metadataValue(metadata, 'rejectionReason', 'RejectionReason', ''),
+    processingTimeSeconds:
+      Number(metadataValue(metadata, 'processingTimeSeconds', 'ProcessingTimeSeconds', 0)) || 0,
+    source: metadataValue(metadata, 'source', 'Source', '')
+  };
+}
+
+function formatTime(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+export default function App() {
+  const [flow, setFlow] = useState('landing');
+  const [sessionPrompt, setSessionPrompt] = useState('');
+  const [sessionTitle, setSessionTitle] = useState('Untitled Session');
+  const [sessionSource, setSessionSource] = useState('Live microphone');
+  const [sessionStart, setSessionStart] = useState(null);
+  const [latestCaption, setLatestCaption] = useState(null);
+  const [translate, setTranslate] = useState(true);
+  const [status, setStatus] = useState('idle');
+  const [isConnected, setIsConnected] = useState(false);
+  const [latency, setLatency] = useState(null);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [micNotice, setMicNotice] = useState(null);
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [fileError, setFileError] = useState('');
+  const [urlError, setUrlError] = useState('');
+  const [reviewItems, setReviewItems] = useState([]);
+  const [importState, setImportState] = useState({
+    status: 'idle',
+    label: 'Waiting',
+    detail: '',
+    progress: 0
+  });
+
+  const [sessionDurationSeconds, setSessionDurationSeconds] = useState(0);
+
+  const translateRef = useRef(translate);
+  const sendTimeRef = useRef(null);
+  const pendingImportRef = useRef(null);
+  const flowRef = useRef(flow);
+  const sessionSourceRef = useRef(sessionSource);
+  const sessionStartRef = useRef(sessionStart);
+
+  const { history, addEntry, updateEntry, clearHistory } = useHistory();
+
+  useEffect(() => {
+    translateRef.current = translate;
+  }, [translate]);
+
+  useEffect(() => {
+    flowRef.current = flow;
+  }, [flow]);
+
+  useEffect(() => {
+    sessionSourceRef.current = sessionSource;
+  }, [sessionSource]);
+
+  useEffect(() => {
+    sessionStartRef.current = sessionStart;
+  }, [sessionStart]);
+
+  // Live session duration
+  useEffect(() => {
+    if (!sessionStart) {
+      setSessionDurationSeconds(0);
+      return;
+    }
+
+    const id = setInterval(() => {
+      if (!sessionStartRef.current) return;
+      const delta = Math.floor((Date.now() - sessionStartRef.current.getTime()) / 1000);
+      setSessionDurationSeconds(delta);
+    }, 250);
+
+    setSessionDurationSeconds(Math.floor((Date.now() - sessionStart.getTime()) / 1000));
+
+    return () => clearInterval(id);
+  }, [sessionStart]);
+
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
-      .withUrl("http://localhost:5260/captionHub")
+      .withUrl(`${API_BASE}/captionHub`)
       .withAutomaticReconnect()
       .build();
-    connectionRef.current = connection;
 
-    connection.on('ReceiveCaption', (english, swahili) => {
-      setCaptions(prev => [...prev, {
-        english,
-        swahili: swahili || "",
-        timestamp: new Date().toLocaleTimeString()
-      }]);
+    connection.on('ReceiveCaption', (english, swahili, metadata = {}) => {
+      const quality = normalizeMetadata(metadata);
+      const now = new Date();
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+      const entry = {
+        id,
+        english: english || '',
+        swahili: swahili || '',
+        timestamp: formatTime(now),
+        source:
+          quality.source ||
+          pendingImportRef.current?.label ||
+          (flowRef.current === 'landing' ? 'Live' : sessionSourceRef.current),
+        sessionSeconds: sessionStartRef.current
+          ? Math.floor((Date.now() - sessionStartRef.current.getTime()) / 1000)
+          : 0,
+        confidence: quality.confidence,
+        status: quality.status,
+        rejectionReason: quality.rejectionReason,
+        processingTimeSeconds: quality.processingTimeSeconds
+      };
+
+      if (quality.status === 'suppressed') {
+        setReviewItems((items) => [{ ...entry, draft: entry.english || '' }, ...items].slice(0, 20));
+        setMicNotice({ type: 'warning', message: quality.rejectionReason || 'Likely silence/noise' });
+        setStatus('suppressed');
+        setErrorMessage(
+          quality.rejectionReason || 'Caption was suppressed because it looked like silence or noise.'
+        );
+        setFlow('caption-workspace');
+        return;
+      }
+
+      if (quality.status === 'review') {
+        setReviewItems((items) => [{ ...entry, draft: entry.english || '' }, ...items].slice(0, 20));
+      }
+
+      setLatestCaption(entry);
+      addEntry(entry);
+      setStatus('ready');
+      setErrorMessage('');
+      setMicNotice({
+        type: 'success',
+        message: quality.status === 'review' ? 'Caption needs review' : 'Caption accepted'
+      });
+      setFlow('caption-workspace');
+
+      if (sendTimeRef.current) {
+        setLatency(Math.round(performance.now() - sendTimeRef.current));
+      }
     });
 
-    connection.onclose(() => console.log("SignalR disconnected"));
-    connection.start().catch(err => console.error("SignalR error:", err));
+    connection.onclose(() => setIsConnected(false));
+    connection.onreconnecting(() => setIsConnected(false));
+    connection.onreconnected(() => setIsConnected(true));
+    connection.start().then(() => setIsConnected(true)).catch(() => setIsConnected(false));
 
-    return () => connection.stop();
-  }, []);
+    return () => {
+      connection.stop();
+    };
+  }, [addEntry]);
 
-  // Send each audio chunk from AudioRecorder to the .NET backend
-  const handleChunkReady = useCallback(async (audioBlob, chunkId) => {
-  const formData = new FormData();
-  formData.append('audio', audioBlob, `chunk_${chunkId}.wav`);
-  const url = `http://localhost:5260/api/audio/upload?translate=${translateRef.current}`;
+  const handleChunkReady = useCallback(async (audioBlob) => {
+    setStatus('processing');
+    setMicNotice({ type: 'success', message: 'Speech chunk sent' });
+    sendTimeRef.current = performance.now();
+
+    const formData = new FormData();
+    formData.append('audio', audioBlob, `chunk_${Date.now()}.wav`);
+
     try {
-      await fetch(url, { method: 'POST', body: formData });
-    } catch (err) {
-      console.error('Upload error:', err);
+      const response = await fetch(`${API_BASE}/api/audio/upload?translate=${translateRef.current}`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+    } catch (error) {
+      setStatus('error');
+      setErrorMessage(error instanceof Error ? error.message : 'Audio upload failed.');
     }
   }, []);
 
-  const latest = captions.length > 0 ? captions[captions.length - 1] : null;
+  const {
+    isRecording,
+    audioLevel,
+    isSpeaking,
+    selectedDevice,
+    start: startRecording,
+    stop: stopRecording
+  } = useAudioAnalyzer({
+    onChunkReady: handleChunkReady,
+    onChunkSkipped: ({ speechMs }) => {
+      setMicNotice({
+        type: 'warning',
+        message: speechMs > 0 ? 'Too quiet / no speech sent' : 'No speech sent'
+      });
+      setStatus('listening');
+    },
+    onRecordingStateChange: (recording) => setStatus(recording ? 'listening' : 'ready'),
+    chunkDurationMs: 4500,
+    minSpeechMs: 650,
+    fftSize: 256,
+    smoothingTimeConstant: 0.8
+  });
+
+  const startSession = useCallback(
+    (sourceLabel) => {
+      const title = sessionPrompt.trim() || 'Untitled Session';
+      setSessionTitle(title);
+      setSessionSource(sourceLabel);
+
+      const now = new Date();
+      setSessionStart(now);
+      setSessionDurationSeconds(0);
+      setLatestCaption(null);
+      setLatency(null);
+      setErrorMessage('');
+      setMicNotice(null);
+    },
+    [sessionPrompt]
+  );
+
+  const handleStartRecording = useCallback(async () => {
+    startSession('Live microphone');
+    setFlow('caption-workspace');
+    pendingImportRef.current = null;
+
+    try {
+      await startRecording(selectedDevice);
+    } catch {
+      setErrorMessage('Microphone access is required to start live recording.');
+    }
+  }, [selectedDevice, startRecording, startSession]);
+
+  const handleToggleRecording = useCallback(async () => {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+
+    if (!sessionStart) {
+      startSession('Live microphone');
+    }
+
+    try {
+      await startRecording(selectedDevice);
+    } catch {
+      setErrorMessage('Microphone access is required to start live recording.');
+    }
+  }, [isRecording, selectedDevice, sessionStart, startRecording, startSession, stopRecording]);
+
+  const finishImport = useCallback((label, detail) => {
+    setImportState({ status: 'complete', label, detail, progress: 100 });
+    setTimeout(() => setFlow('caption-workspace'), 350);
+  }, []);
+
+  const failImport = useCallback((detail) => {
+    setImportState({
+      status: 'error',
+      label: 'Import failed',
+      detail,
+      progress: 100
+    });
+    setErrorMessage(detail);
+  }, []);
+
+  const importFile = useCallback(
+    async (file) => {
+      if (!isSupportedFile(file)) {
+        setFileError('Choose a supported audio or video file: .wav, .mp3, .webm, .mp4, .m4a, or .ogg.');
+        return;
+      }
+
+      setFileError('');
+      startSession(file.name);
+      setFlow('processing-import');
+      setErrorMessage('');
+      pendingImportRef.current = { label: file.name };
+
+      setImportState({
+        status: 'processing',
+        label: `Processing ${file.name}`,
+        detail: 'Uploading media and creating captions.',
+        progress: 35
+      });
+
+      sendTimeRef.current = performance.now();
+
+      const formData = new FormData();
+      formData.append('media', file, file.name);
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/audio/import-file?translate=${translateRef.current}`,
+          { method: 'POST', body: formData }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+        setImportState((current) => ({
+          ...current,
+          detail: 'Captions received. Opening workspace.',
+          progress: 90
+        }));
+        finishImport('Import complete', file.name);
+      } catch (error) {
+        failImport(error instanceof Error ? error.message : 'File import failed.');
+      }
+    },
+    [failImport, finishImport, startSession]
+  );
+
+  const importUrl = useCallback(
+    async () => {
+      const value = mediaUrl.trim();
+      if (!isSupportedUrl(value)) {
+        setUrlError('Enter a direct media URL ending in .wav, .mp3, .webm, .mp4, .m4a, or .ogg.');
+        return;
+      }
+
+      setUrlError('');
+      startSession(value);
+      setFlow('processing-import');
+      setErrorMessage('');
+      pendingImportRef.current = { label: value };
+
+      setImportState({
+        status: 'processing',
+        label: 'Processing direct media URL',
+        detail: value,
+        progress: 30
+      });
+
+      sendTimeRef.current = performance.now();
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/audio/import-url?translate=${translateRef.current}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: value })
+          }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+        setImportState((current) => ({
+          ...current,
+          detail: 'Captions received. Opening workspace.',
+          progress: 90
+        }));
+        finishImport('Import complete', value);
+      } catch (error) {
+        failImport(error instanceof Error ? error.message : 'URL import failed.');
+      }
+    },
+    [failImport, finishImport, mediaUrl, startSession]
+  );
+
+  const handleUpdateReview = useCallback((id, draft) => {
+    setReviewItems((items) => items.map((item) => (item.id === id ? { ...item, draft } : item)));
+  }, []);
+
+  const handleDiscardReview = useCallback((id) => {
+    setReviewItems((items) => items.filter((item) => item.id !== id));
+  }, []);
+
+  const handleApproveReview = useCallback(
+    (id) => {
+      const item = reviewItems.find((entry) => entry.id === id);
+      if (!item) return;
+
+      const approvedEntry = {
+        ...item,
+        english: item.draft.trim() || item.english,
+        status: 'accepted',
+        rejectionReason: '',
+        source: `${item.source || 'Reviewed'} (approved)`
+      };
+      delete approvedEntry.draft;
+
+      if (item.status === 'suppressed') {
+        addEntry(approvedEntry);
+      } else {
+        updateEntry(id, approvedEntry);
+      }
+
+      setLatestCaption(approvedEntry);
+      setReviewItems((items) => items.filter((entry) => entry.id !== id));
+    },
+    [addEntry, reviewItems, updateEntry]
+  );
+
+  const handleBackToLanding = useCallback(() => {
+    if (isRecording) stopRecording();
+    setFlow('landing');
+    setStatus('idle');
+    setErrorMessage('');
+    pendingImportRef.current = null;
+  }, [isRecording, stopRecording]);
+
+  if (flow === 'landing') {
+    return (
+      <Homepage
+        sessionPrompt={sessionPrompt}
+        onPromptChange={setSessionPrompt}
+        mediaUrl={mediaUrl}
+        onMediaUrlChange={setMediaUrl}
+        onStartRecording={handleStartRecording}
+        onFileSelected={importFile}
+        onUrlImport={importUrl}
+        fileError={fileError}
+        urlError={urlError}
+      />
+    );
+  }
+
+  if (flow === 'processing-import') {
+    return (
+      <ProcessingView
+        sessionTitle={sessionTitle}
+        importState={importState}
+        onBack={handleBackToLanding}
+        onRetry={() => setFlow('landing')}
+      />
+    );
+  }
 
   return (
-    <div style={{ padding: '20px', fontFamily: 'Arial', maxWidth: '900px', margin: '0 auto' }}>
-      <h1>🎙️ Real-Time Captioning</h1>
-      <p>English – Kiswahili Translation</p>
-
-      <div style={{ display: 'flex', alignItems: 'center', gap: '15px', marginBottom: '20px' }}>
-        <AudioRecorder onChunkReady={handleChunkReady} />
-        <button
-          onClick={() => setTranslate(t => !t)}
-          style={{
-            padding: '12px 24px',
-            fontSize: '16px',
-            backgroundColor: translate ? '#3498db' : '#95a5a6',
-            color: 'white',
-            border: 'none',
-            borderRadius: '5px',
-            cursor: 'pointer'
-          }}
-        >
-          🌍 Translate: {translate ? 'ON' : 'OFF'}
-        </button>
-      </div>
-
-      {/* Live caption */}
-      <div style={{
-        padding: '25px',
-        backgroundColor: '#2c3e50',
-        color: 'white',
-        borderRadius: '10px',
-        minHeight: '100px',
-        fontSize: '28px',
-        fontWeight: 'bold',
-        marginBottom: '20px'
-      }}>
-        {latest ? (
-          <>
-            <div>{latest.english || '...'}</div>
-            {latest.swahili && (
-              <div style={{ fontSize: '24px', color: '#3498db', fontStyle: 'italic', marginTop: '8px' }}>
-                {latest.swahili}
-              </div>
-            )}
-            <div style={{ fontSize: '12px', color: '#95a5a6', marginTop: '12px' }}>
-              {latest.timestamp}
-            </div>
-          </>
-        ) : (
-          <div style={{ fontSize: '22px', color: '#7f8c8d', textAlign: 'center', padding: '30px' }}>
-            Start speaking to see live captions...
-          </div>
-        )}
-      </div>
-
-      {/* Caption history */}
-      <h3>📝 Caption History</h3>
-      <div style={{ maxHeight: '350px', overflowY: 'auto' }}>
-        {captions.slice().reverse().map((c, i) => (
-          <div key={i} style={{
-            padding: '12px',
-            borderBottom: '1px solid #eee'
-          }}>
-            <div><strong>EN:</strong> {c.english}</div>
-            {c.swahili && (
-              <div style={{ color: '#2980b9' }}><strong>SW:</strong> {c.swahili}</div>
-            )}
-            <div style={{ fontSize: '11px', color: '#bdc3c7', marginTop: '4px' }}>{c.timestamp}</div>
-          </div>
-        ))}
-      </div>
-    </div>
+    <Workstation
+      sessionTitle={sessionTitle}
+      sessionSource={sessionSource}
+      captions={history}
+      latestCaption={latestCaption || history[0]}
+      isRecording={isRecording}
+      status={status}
+      isConnected={isConnected}
+      translate={translate}
+      audioLevel={audioLevel * 100}
+      isSpeaking={isSpeaking}
+      micNotice={micNotice}
+      latency={latency}
+      errorMessage={errorMessage}
+      reviewItems={reviewItems}
+      sessionDurationSeconds={sessionDurationSeconds}
+      onToggleRecording={handleToggleRecording}
+      onToggleTranslate={() => setTranslate((value) => !value)}
+      onClearHistory={clearHistory}
+      onApproveReview={handleApproveReview}
+      onUpdateReview={handleUpdateReview}
+      onDiscardReview={handleDiscardReview}
+      onBackToLanding={handleBackToLanding}
+    />
   );
 }
-
-export default App;
