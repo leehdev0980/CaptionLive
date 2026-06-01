@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 const STORAGE_KEY = 'caption_history';
 
@@ -17,14 +17,20 @@ export function useHistory() {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
   }, [history]);
 
-  const addEntry = (entry) => {
+  const addEntry = useCallback((entry) => {
     setHistory(prev => [entry, ...prev].slice(0, 200)); // keep last 200 entries
-  };
+  }, []);
 
-  const clearHistory = () => {
+  const updateEntry = useCallback((id, changes) => {
+    setHistory(prev => prev.map(entry => (
+      entry.id === id ? { ...entry, ...changes } : entry
+    )));
+  }, []);
+
+  const clearHistory = useCallback(() => {
     setHistory([]);
     localStorage.removeItem(STORAGE_KEY);
-  };
+  }, []);
 
-  return { history, addEntry, clearHistory };
+  return { history, addEntry, updateEntry, clearHistory };
 }

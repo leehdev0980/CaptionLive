@@ -1,308 +1,479 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import * as signalR from '@microsoft/signalr';
-import AudioRecorderPcm from './components/AudioRecorderPcm';
-import StatusIndicator from './components/StatusIndicator';
+
+import Homepage from './pages/Homepage';
+import ProcessingView from './pages/ProcessingView';
+import Workstation from './pages/Workstation';
+
+import { useAudioAnalyzer } from './hooks/useAudioAnalyzer';
 import { useHistory } from './hooks/useHistory';
 
-function App() {
-  // State
+const API_BASE = 'http://localhost:5260';
+const SUPPORTED_MEDIA_EXTENSIONS = ['.wav', '.mp3', '.webm', '.mp4', '.m4a', '.ogg'];
+
+function isSupportedUrl(value) {
+  try {
+    const url = new URL(value);
+    const pathname = url.pathname.toLowerCase();
+    return SUPPORTED_MEDIA_EXTENSIONS.some((extension) => pathname.endsWith(extension));
+  } catch {
+    return false;
+  }
+}
+
+function isSupportedFile(file) {
+  const lowerName = file.name.toLowerCase();
+  return SUPPORTED_MEDIA_EXTENSIONS.some((extension) => lowerName.endsWith(extension));
+}
+
+function metadataValue(metadata, camelName, pascalName, fallback = '') {
+  if (!metadata) return fallback;
+  return metadata[camelName] ?? metadata[pascalName] ?? fallback;
+}
+
+function normalizeMetadata(metadata = {}) {
+  return {
+    confidence: Number(metadataValue(metadata, 'confidence', 'Confidence', 0)) || 0,
+    status: metadataValue(metadata, 'status', 'Status', 'accepted') || 'accepted',
+    rejectionReason: metadataValue(metadata, 'rejectionReason', 'RejectionReason', ''),
+    processingTimeSeconds:
+      Number(metadataValue(metadata, 'processingTimeSeconds', 'ProcessingTimeSeconds', 0)) || 0,
+    source: metadataValue(metadata, 'source', 'Source', '')
+  };
+}
+
+function formatTime(date = new Date()) {
+  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+}
+
+export default function App() {
+  const [flow, setFlow] = useState('landing');
+  const [sessionPrompt, setSessionPrompt] = useState('');
+  const [sessionTitle, setSessionTitle] = useState('Untitled Session');
+  const [sessionSource, setSessionSource] = useState('Live microphone');
+  const [sessionStart, setSessionStart] = useState(null);
   const [latestCaption, setLatestCaption] = useState(null);
+  const [translate, setTranslate] = useState(true);
   const [status, setStatus] = useState('idle');
-  const [translate, setTranslate] = useState(false);
+  const [isConnected, setIsConnected] = useState(false);
   const [latency, setLatency] = useState(null);
-  const [errorCount, setErrorCount] = useState(0);
+  const [errorMessage, setErrorMessage] = useState('');
+  const [micNotice, setMicNotice] = useState(null);
+  const [mediaUrl, setMediaUrl] = useState('');
+  const [fileError, setFileError] = useState('');
+  const [urlError, setUrlError] = useState('');
+  const [reviewItems, setReviewItems] = useState([]);
+  const [importState, setImportState] = useState({
+    status: 'idle',
+    label: 'Waiting',
+    detail: '',
+    progress: 0
+  });
 
-  // Refs
-  const connectionRef = useRef(null);
-  const translateRef = useRef(false);
+  const [sessionDurationSeconds, setSessionDurationSeconds] = useState(0);
+
+  const translateRef = useRef(translate);
   const sendTimeRef = useRef(null);
+  const pendingImportRef = useRef(null);
+  const flowRef = useRef(flow);
+  const sessionSourceRef = useRef(sessionSource);
+  const sessionStartRef = useRef(sessionStart);
 
-  // Custom history hook
-  const { history, addEntry, clearHistory } = useHistory();
+  const { history, addEntry, updateEntry, clearHistory } = useHistory();
 
-  // Sync translate ref
-  useEffect(() => { translateRef.current = translate; }, [translate]);
+  useEffect(() => {
+    translateRef.current = translate;
+  }, [translate]);
 
-  // SignalR connection
+  useEffect(() => {
+    flowRef.current = flow;
+  }, [flow]);
+
+  useEffect(() => {
+    sessionSourceRef.current = sessionSource;
+  }, [sessionSource]);
+
+  useEffect(() => {
+    sessionStartRef.current = sessionStart;
+  }, [sessionStart]);
+
+  // Live session duration
+  useEffect(() => {
+    if (!sessionStart) {
+      setSessionDurationSeconds(0);
+      return;
+    }
+
+    const id = setInterval(() => {
+      if (!sessionStartRef.current) return;
+      const delta = Math.floor((Date.now() - sessionStartRef.current.getTime()) / 1000);
+      setSessionDurationSeconds(delta);
+    }, 250);
+
+    setSessionDurationSeconds(Math.floor((Date.now() - sessionStart.getTime()) / 1000));
+
+    return () => clearInterval(id);
+  }, [sessionStart]);
+
   useEffect(() => {
     const connection = new signalR.HubConnectionBuilder()
-      .withUrl("http://localhost:5260/captionHub")
+      .withUrl(`${API_BASE}/captionHub`)
       .withAutomaticReconnect()
       .build();
-    connectionRef.current = connection;
 
-    connection.on('ReceiveCaption', (english, swahili) => {
+    connection.on('ReceiveCaption', (english, swahili, metadata = {}) => {
+      const quality = normalizeMetadata(metadata);
+      const now = new Date();
+      const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
       const entry = {
-        english: english || "",
-        swahili: swahili || "",
-        timestamp: new Date().toLocaleTimeString()
+        id,
+        english: english || '',
+        swahili: swahili || '',
+        timestamp: formatTime(now),
+        source:
+          quality.source ||
+          pendingImportRef.current?.label ||
+          (flowRef.current === 'landing' ? 'Live' : sessionSourceRef.current),
+        sessionSeconds: sessionStartRef.current
+          ? Math.floor((Date.now() - sessionStartRef.current.getTime()) / 1000)
+          : 0,
+        confidence: quality.confidence,
+        status: quality.status,
+        rejectionReason: quality.rejectionReason,
+        processingTimeSeconds: quality.processingTimeSeconds
       };
+
+      if (quality.status === 'suppressed') {
+        setReviewItems((items) => [{ ...entry, draft: entry.english || '' }, ...items].slice(0, 20));
+        setMicNotice({ type: 'warning', message: quality.rejectionReason || 'Likely silence/noise' });
+        setStatus('suppressed');
+        setErrorMessage(
+          quality.rejectionReason || 'Caption was suppressed because it looked like silence or noise.'
+        );
+        setFlow('caption-workspace');
+        return;
+      }
+
+      if (quality.status === 'review') {
+        setReviewItems((items) => [{ ...entry, draft: entry.english || '' }, ...items].slice(0, 20));
+      }
 
       setLatestCaption(entry);
       addEntry(entry);
-      setStatus('idle');
+      setStatus('ready');
+      setErrorMessage('');
+      setMicNotice({
+        type: 'success',
+        message: quality.status === 'review' ? 'Caption needs review' : 'Caption accepted'
+      });
+      setFlow('caption-workspace');
 
-      // Calculate latency
       if (sendTimeRef.current) {
-        const ms = Math.round(performance.now() - sendTimeRef.current);
-        setLatency(ms);
+        setLatency(Math.round(performance.now() - sendTimeRef.current));
       }
     });
 
-    connection.onclose(() => console.log("SignalR disconnected"));
-    connection.start()
-      .then(() => console.log("SignalR connected"))
-      .catch(err => console.error("SignalR error:", err));
+    connection.onclose(() => setIsConnected(false));
+    connection.onreconnecting(() => setIsConnected(false));
+    connection.onreconnected(() => setIsConnected(true));
+    connection.start().then(() => setIsConnected(true)).catch(() => setIsConnected(false));
 
-    return () => connection.stop();
+    return () => {
+      connection.stop();
+    };
   }, [addEntry]);
 
-  // Handle audio chunks
-  const handleChunkReady = useCallback(async (wavBlob, chunkId) => {
+  const handleChunkReady = useCallback(async (audioBlob) => {
     setStatus('processing');
+    setMicNotice({ type: 'success', message: 'Speech chunk sent' });
     sendTimeRef.current = performance.now();
 
     const formData = new FormData();
-    formData.append('audio', wavBlob, `chunk_${chunkId}.wav`);
-    const url = `http://localhost:5260/api/audio/upload?translate=${translateRef.current}`;
+    formData.append('audio', audioBlob, `chunk_${Date.now()}.wav`);
 
     try {
-      const response = await fetch(url, { method: 'POST', body: formData });
-      if (!response.ok) {
-        setErrorCount(prev => prev + 1);
-        setStatus('error');
-        setTimeout(() => setStatus('listening'), 2000);
-      }
-    } catch (err) {
-      console.error('Upload error:', err);
-      setErrorCount(prev => prev + 1);
+      const response = await fetch(`${API_BASE}/api/audio/upload?translate=${translateRef.current}`, {
+        method: 'POST',
+        body: formData
+      });
+
+      if (!response.ok) throw new Error(await response.text());
+    } catch (error) {
       setStatus('error');
-      setTimeout(() => setStatus('listening'), 3000);
+      setErrorMessage(error instanceof Error ? error.message : 'Audio upload failed.');
     }
   }, []);
 
-  // Recording state change handler
-  const handleRecordingStateChange = useCallback((isRecording) => {
-    setStatus(isRecording ? 'listening' : 'idle');
-    if (!isRecording) {
+  const {
+    isRecording,
+    audioLevel,
+    isSpeaking,
+    selectedDevice,
+    start: startRecording,
+    stop: stopRecording
+  } = useAudioAnalyzer({
+    onChunkReady: handleChunkReady,
+    onChunkSkipped: ({ speechMs }) => {
+      setMicNotice({
+        type: 'warning',
+        message: speechMs > 0 ? 'Too quiet / no speech sent' : 'No speech sent'
+      });
+      setStatus('listening');
+    },
+    onRecordingStateChange: (recording) => setStatus(recording ? 'listening' : 'ready'),
+    chunkDurationMs: 4500,
+    minSpeechMs: 650,
+    fftSize: 256,
+    smoothingTimeConstant: 0.8
+  });
+
+  const startSession = useCallback(
+    (sourceLabel) => {
+      const title = sessionPrompt.trim() || 'Untitled Session';
+      setSessionTitle(title);
+      setSessionSource(sourceLabel);
+
+      const now = new Date();
+      setSessionStart(now);
+      setSessionDurationSeconds(0);
+      setLatestCaption(null);
       setLatency(null);
-      setErrorCount(0);
+      setErrorMessage('');
+      setMicNotice(null);
+    },
+    [sessionPrompt]
+  );
+
+  const handleStartRecording = useCallback(async () => {
+    startSession('Live microphone');
+    setFlow('caption-workspace');
+    pendingImportRef.current = null;
+
+    try {
+      await startRecording(selectedDevice);
+    } catch {
+      setErrorMessage('Microphone access is required to start live recording.');
     }
+  }, [selectedDevice, startRecording, startSession]);
+
+  const handleToggleRecording = useCallback(async () => {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+
+    if (!sessionStart) {
+      startSession('Live microphone');
+    }
+
+    try {
+      await startRecording(selectedDevice);
+    } catch {
+      setErrorMessage('Microphone access is required to start live recording.');
+    }
+  }, [isRecording, selectedDevice, sessionStart, startRecording, startSession, stopRecording]);
+
+  const finishImport = useCallback((label, detail) => {
+    setImportState({ status: 'complete', label, detail, progress: 100 });
+    setTimeout(() => setFlow('caption-workspace'), 350);
   }, []);
+
+  const failImport = useCallback((detail) => {
+    setImportState({
+      status: 'error',
+      label: 'Import failed',
+      detail,
+      progress: 100
+    });
+    setErrorMessage(detail);
+  }, []);
+
+  const importFile = useCallback(
+    async (file) => {
+      if (!isSupportedFile(file)) {
+        setFileError('Choose a supported audio or video file: .wav, .mp3, .webm, .mp4, .m4a, or .ogg.');
+        return;
+      }
+
+      setFileError('');
+      startSession(file.name);
+      setFlow('processing-import');
+      setErrorMessage('');
+      pendingImportRef.current = { label: file.name };
+
+      setImportState({
+        status: 'processing',
+        label: `Processing ${file.name}`,
+        detail: 'Uploading media and creating captions.',
+        progress: 35
+      });
+
+      sendTimeRef.current = performance.now();
+
+      const formData = new FormData();
+      formData.append('media', file, file.name);
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/audio/import-file?translate=${translateRef.current}`,
+          { method: 'POST', body: formData }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+        setImportState((current) => ({
+          ...current,
+          detail: 'Captions received. Opening workspace.',
+          progress: 90
+        }));
+        finishImport('Import complete', file.name);
+      } catch (error) {
+        failImport(error instanceof Error ? error.message : 'File import failed.');
+      }
+    },
+    [failImport, finishImport, startSession]
+  );
+
+  const importUrl = useCallback(
+    async () => {
+      const value = mediaUrl.trim();
+      if (!isSupportedUrl(value)) {
+        setUrlError('Enter a direct media URL ending in .wav, .mp3, .webm, .mp4, .m4a, or .ogg.');
+        return;
+      }
+
+      setUrlError('');
+      startSession(value);
+      setFlow('processing-import');
+      setErrorMessage('');
+      pendingImportRef.current = { label: value };
+
+      setImportState({
+        status: 'processing',
+        label: 'Processing direct media URL',
+        detail: value,
+        progress: 30
+      });
+
+      sendTimeRef.current = performance.now();
+
+      try {
+        const response = await fetch(
+          `${API_BASE}/api/audio/import-url?translate=${translateRef.current}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: value })
+          }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+        setImportState((current) => ({
+          ...current,
+          detail: 'Captions received. Opening workspace.',
+          progress: 90
+        }));
+        finishImport('Import complete', value);
+      } catch (error) {
+        failImport(error instanceof Error ? error.message : 'URL import failed.');
+      }
+    },
+    [failImport, finishImport, mediaUrl, startSession]
+  );
+
+  const handleUpdateReview = useCallback((id, draft) => {
+    setReviewItems((items) => items.map((item) => (item.id === id ? { ...item, draft } : item)));
+  }, []);
+
+  const handleDiscardReview = useCallback((id) => {
+    setReviewItems((items) => items.filter((item) => item.id !== id));
+  }, []);
+
+  const handleApproveReview = useCallback(
+    (id) => {
+      const item = reviewItems.find((entry) => entry.id === id);
+      if (!item) return;
+
+      const approvedEntry = {
+        ...item,
+        english: item.draft.trim() || item.english,
+        status: 'accepted',
+        rejectionReason: '',
+        source: `${item.source || 'Reviewed'} (approved)`
+      };
+      delete approvedEntry.draft;
+
+      if (item.status === 'suppressed') {
+        addEntry(approvedEntry);
+      } else {
+        updateEntry(id, approvedEntry);
+      }
+
+      setLatestCaption(approvedEntry);
+      setReviewItems((items) => items.filter((entry) => entry.id !== id));
+    },
+    [addEntry, reviewItems, updateEntry]
+  );
+
+  const handleBackToLanding = useCallback(() => {
+    if (isRecording) stopRecording();
+    setFlow('landing');
+    setStatus('idle');
+    setErrorMessage('');
+    pendingImportRef.current = null;
+  }, [isRecording, stopRecording]);
+
+  if (flow === 'landing') {
+    return (
+      <Homepage
+        sessionPrompt={sessionPrompt}
+        onPromptChange={setSessionPrompt}
+        mediaUrl={mediaUrl}
+        onMediaUrlChange={setMediaUrl}
+        onStartRecording={handleStartRecording}
+        onFileSelected={importFile}
+        onUrlImport={importUrl}
+        fileError={fileError}
+        urlError={urlError}
+      />
+    );
+  }
+
+  if (flow === 'processing-import') {
+    return (
+      <ProcessingView
+        sessionTitle={sessionTitle}
+        importState={importState}
+        onBack={handleBackToLanding}
+        onRetry={() => setFlow('landing')}
+      />
+    );
+  }
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      backgroundColor: '#ecf0f1',
-      fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif'
-    }}>
-      <div style={{ maxWidth: '900px', margin: '0 auto', padding: '20px' }}>
-        
-        {/* Header */}
-        <div style={{ textAlign: 'center', marginBottom: '20px' }}>
-          <h1 style={{ fontSize: '32px', margin: '0 0 5px 0', color: '#2c3e50' }}>
-            🎙️ Real-Time Captioning
-          </h1>
-          <p style={{ color: '#7f8c8d', margin: '0', fontSize: '14px' }}>
-            English Speech-to-Text with Kiswahili Translation
-          </p>
-        </div>
-
-        {/* Controls Bar */}
-        <div style={{
-          display: 'flex',
-          gap: '12px',
-          alignItems: 'center',
-          flexWrap: 'wrap',
-          padding: '15px',
-          backgroundColor: 'white',
-          borderRadius: '10px',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.05)',
-          marginBottom: '20px'
-        }}>
-          <AudioRecorderPcm 
-            onChunkReady={handleChunkReady} 
-            onRecordingStateChange={handleRecordingStateChange}
-          />
-          
-          <button
-            onClick={() => setTranslate(t => !t)}
-            style={{
-              padding: '12px 20px',
-              fontSize: '14px',
-              fontWeight: '600',
-              backgroundColor: translate ? '#2980b9' : '#95a5a6',
-              color: 'white',
-              border: 'none',
-              borderRadius: '5px',
-              cursor: 'pointer',
-              transition: 'background-color 0.2s'
-            }}
-          >
-            🌍 Translate: {translate ? 'ON' : 'OFF'}
-          </button>
-
-          <StatusIndicator status={status} />
-
-          {latency !== null && (
-            <span style={{
-              fontSize: '13px',
-              color: '#7f8c8d',
-              fontWeight: '500',
-              backgroundColor: '#f0f0f0',
-              padding: '6px 12px',
-              borderRadius: '15px'
-            }}>
-              ⚡ Latency: {(latency / 1000).toFixed(1)}s
-            </span>
-          )}
-
-          {errorCount > 0 && (
-            <span style={{
-              fontSize: '13px',
-              color: '#e74c3c',
-              fontWeight: '500'
-            }}>
-              ⚠️ Errors: {errorCount}
-            </span>
-          )}
-        </div>
-
-        {/* Live Caption Display */}
-        <div style={{
-          padding: '25px',
-          backgroundColor: '#2c3e50',
-          color: 'white',
-          borderRadius: '10px',
-          minHeight: '120px',
-          marginBottom: '20px',
-          boxShadow: '0 4px 6px rgba(0,0,0,0.1)',
-          transition: 'all 0.3s ease'
-        }}>
-          {latestCaption ? (
-            <>
-              <div style={{
-                fontSize: '30px',
-                fontWeight: '600',
-                marginBottom: '8px',
-                lineHeight: '1.3'
-              }}>
-                {latestCaption.english || '\u00A0'}
-              </div>
-              {latestCaption.swahili && (
-                <div style={{
-                  fontSize: '24px',
-                  color: '#3498db',
-                  fontStyle: 'italic',
-                  lineHeight: '1.3'
-                }}>
-                  {latestCaption.swahili}
-                </div>
-              )}
-              <div style={{
-                fontSize: '12px',
-                color: '#95a5a6',
-                marginTop: '12px'
-              }}>
-                {latestCaption.timestamp}
-              </div>
-            </>
-          ) : (
-            <div style={{
-              fontSize: '22px',
-              color: '#7f8c8d',
-              textAlign: 'center',
-              padding: '30px 0'
-            }}>
-              Click "Start Recording" and speak to see live captions...
-            </div>
-          )}
-        </div>
-
-        {/* Caption History */}
-        <div style={{
-          backgroundColor: 'white',
-          borderRadius: '10px',
-          padding: '20px',
-          boxShadow: '0 2px 4px rgba(0,0,0,0.05)'
-        }}>
-          <div style={{
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            marginBottom: '15px'
-          }}>
-            <h3 style={{ margin: 0, color: '#2c3e50' }}>
-              📝 Caption History ({history.length})
-            </h3>
-            {history.length > 0 && (
-              <button
-                onClick={clearHistory}
-                style={{
-                  padding: '6px 14px',
-                  fontSize: '13px',
-                  backgroundColor: '#e74c3c',
-                  color: 'white',
-                  border: 'none',
-                  borderRadius: '4px',
-                  cursor: 'pointer'
-                }}
-              >
-                🗑 Clear History
-              </button>
-            )}
-          </div>
-
-          <div style={{ maxHeight: '400px', overflowY: 'auto' }}>
-            {history.length === 0 ? (
-              <p style={{
-                color: '#bdc3c7',
-                textAlign: 'center',
-                padding: '30px',
-                fontStyle: 'italic'
-              }}>
-                No captions yet. Start recording to build history.
-              </p>
-            ) : (
-              history.map((entry, i) => (
-                <div key={i} style={{
-                  padding: '12px',
-                  borderBottom: i !== history.length - 1 ? '1px solid #ecf0f1' : 'none',
-                  backgroundColor: i === 0 ? '#f8f9fa' : 'transparent'
-                }}>
-                  <div style={{ fontWeight: '500' }}>
-                    <strong style={{ color: '#2c3e50' }}>EN:</strong> {entry.english || '(silence)'}
-                  </div>
-                  {entry.swahili && (
-                    <div style={{ color: '#2980b9', marginTop: '4px' }}>
-                      <strong>SW:</strong> {entry.swahili}
-                    </div>
-                  )}
-                  <div style={{
-                    fontSize: '11px',
-                    color: '#bdc3c7',
-                    marginTop: '6px'
-                  }}>
-                    {entry.timestamp}
-                  </div>
-                </div>
-              ))
-            )}
-          </div>
-        </div>
-
-        {/* Footer Info */}
-        <div style={{
-          textAlign: 'center',
-          marginTop: '20px',
-          fontSize: '12px',
-          color: '#bdc3c7'
-        }}>
-          Captions are stored locally in your browser • No data is sent to external servers
-        </div>
-      </div>
-    </div>
+    <Workstation
+      sessionTitle={sessionTitle}
+      sessionSource={sessionSource}
+      captions={history}
+      latestCaption={latestCaption || history[0]}
+      isRecording={isRecording}
+      status={status}
+      isConnected={isConnected}
+      translate={translate}
+      audioLevel={audioLevel * 100}
+      isSpeaking={isSpeaking}
+      micNotice={micNotice}
+      latency={latency}
+      errorMessage={errorMessage}
+      reviewItems={reviewItems}
+      sessionDurationSeconds={sessionDurationSeconds}
+      onToggleRecording={handleToggleRecording}
+      onToggleTranslate={() => setTranslate((value) => !value)}
+      onClearHistory={clearHistory}
+      onApproveReview={handleApproveReview}
+      onUpdateReview={handleUpdateReview}
+      onDiscardReview={handleDiscardReview}
+      onBackToLanding={handleBackToLanding}
+    />
   );
 }
-
-export default App;
