@@ -1,14 +1,37 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
-import * as signalR from '@microsoft/signalr';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+
+import { useCaptionHub } from './hooks/useCaptionHub';
 
 import Homepage from './pages/Homepage';
 import ProcessingView from './pages/ProcessingView';
-import Workstation from './pages/Workstation';
+import Onboarding from './pages/Onboarding';
+
+import LiveSessionView from './components/workspace/LiveSessionView';
+import ImportWorkspace from './pages/ImportWorkspace';
+import ImportPlaybackView from './pages/ImportPlaybackView';
+
 
 import { useAudioAnalyzer } from './hooks/useAudioAnalyzer';
 import { useHistory } from './hooks/useHistory';
 
-const API_BASE = 'http://localhost:5260';
+function getApiBase() {
+  const envBase = import.meta?.env?.VITE_API_BASE;
+  if (envBase) return envBase;
+
+  const candidates = ['http://localhost:5260', 'http://localhost:12761'];
+  for (const base of candidates) {
+    try {
+      const u = new URL(base);
+      if (u.hostname && u.port) return base;
+    } catch {
+      // ignore
+    }
+  }
+
+  return window.location.origin;
+}
+
 const SUPPORTED_MEDIA_EXTENSIONS = ['.wav', '.mp3', '.webm', '.mp4', '.m4a', '.ogg'];
 
 function isSupportedUrl(value) {
@@ -47,21 +70,46 @@ function formatTime(date = new Date()) {
 }
 
 export default function App() {
+  // flows:
+  // - landing: name prompt + start session
+  // - onboarding: user roles + input mode selection
+  // - processing-import: file/url import progress
+  // - live-workspace: mic/live captions
+  // - import-workspace: imported media captions
+  // - import-playback-workspace: imported media playback + caption timelapse
   const [flow, setFlow] = useState('landing');
+
+
+
   const [sessionPrompt, setSessionPrompt] = useState('');
   const [sessionTitle, setSessionTitle] = useState('Untitled Session');
   const [sessionSource, setSessionSource] = useState('Live microphone');
+
+  const [userTypes, setUserTypes] = useState([]);
+  const [selectedInputModes, setSelectedInputModes] = useState([]);
+  const [onboardingError, setOnboardingError] = useState('');
+
+  // Stable after onboarding; used to decide which workspace to render
+  // 'mic' | 'file' | 'url' | null
+  const [currentInputMode, setCurrentInputMode] = useState(null);
+
+  const [pendingAction, setPendingAction] = useState(null); // { type: 'mic'|'file'|'url', payload? }
   const [sessionStart, setSessionStart] = useState(null);
+
   const [latestCaption, setLatestCaption] = useState(null);
+
   const [translate, setTranslate] = useState(true);
   const [status, setStatus] = useState('idle');
-  const [isConnected, setIsConnected] = useState(false);
   const [latency, setLatency] = useState(null);
+
   const [errorMessage, setErrorMessage] = useState('');
+  const [sessionNameError, setSessionNameError] = useState('');
   const [micNotice, setMicNotice] = useState(null);
+
   const [mediaUrl, setMediaUrl] = useState('');
   const [fileError, setFileError] = useState('');
   const [urlError, setUrlError] = useState('');
+
   const [reviewItems, setReviewItems] = useState([]);
   const [importState, setImportState] = useState({
     status: 'idle',
@@ -75,11 +123,11 @@ export default function App() {
   const translateRef = useRef(translate);
   const sendTimeRef = useRef(null);
   const pendingImportRef = useRef(null);
+
   const flowRef = useRef(flow);
   const sessionSourceRef = useRef(sessionSource);
   const sessionStartRef = useRef(sessionStart);
-
-  const { history, addEntry, updateEntry, clearHistory } = useHistory();
+  const currentInputModeRef = useRef(currentInputMode);
 
   useEffect(() => {
     translateRef.current = translate;
@@ -97,31 +145,25 @@ export default function App() {
     sessionStartRef.current = sessionStart;
   }, [sessionStart]);
 
-  // Live session duration
   useEffect(() => {
-    if (!sessionStart) {
-      setSessionDurationSeconds(0);
-      return;
-    }
+    currentInputModeRef.current = currentInputMode;
+  }, [currentInputMode]);
 
-    const id = setInterval(() => {
-      if (!sessionStartRef.current) return;
-      const delta = Math.floor((Date.now() - sessionStartRef.current.getTime()) / 1000);
-      setSessionDurationSeconds(delta);
-    }, 250);
+  const { history, addEntry, updateEntry, clearHistory } = useHistory();
 
-    setSessionDurationSeconds(Math.floor((Date.now() - sessionStart.getTime()) / 1000));
+  const inputModeToWorkspaceFlow = useCallback((mode) => {
+    if (mode === 'mic') return 'live-workspace';
+    // onboarding imports should land in the dedicated playback view
+    if (mode === 'file' || mode === 'url') return 'import-playback-workspace';
+    return 'landing';
+  }, []);
 
-    return () => clearInterval(id);
-  }, [sessionStart]);
+  const setWorkspaceByInputMode = useCallback(() => {
+    setFlow(inputModeToWorkspaceFlow(currentInputModeRef.current));
+  }, [inputModeToWorkspaceFlow]);
 
-  useEffect(() => {
-    const connection = new signalR.HubConnectionBuilder()
-      .withUrl(`${API_BASE}/captionHub`)
-      .withAutomaticReconnect()
-      .build();
-
-    connection.on('ReceiveCaption', (english, swahili, metadata = {}) => {
+  const handleReceiveCaption = useCallback(
+    ({ english, swahili, metadata = {} }) => {
       const quality = normalizeMetadata(metadata);
       const now = new Date();
       const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -149,9 +191,11 @@ export default function App() {
         setMicNotice({ type: 'warning', message: quality.rejectionReason || 'Likely silence/noise' });
         setStatus('suppressed');
         setErrorMessage(
-          quality.rejectionReason || 'Caption was suppressed because it looked like silence or noise.'
+          quality.rejectionReason ||
+            'Caption was suppressed because it looked like silence or noise.'
         );
-        setFlow('caption-workspace');
+
+        setWorkspaceByInputMode();
         return;
       }
 
@@ -161,49 +205,86 @@ export default function App() {
 
       setLatestCaption(entry);
       addEntry(entry);
+
       setStatus('ready');
       setErrorMessage('');
       setMicNotice({
         type: 'success',
         message: quality.status === 'review' ? 'Caption needs review' : 'Caption accepted'
       });
-      setFlow('caption-workspace');
+
+      setWorkspaceByInputMode();
 
       if (sendTimeRef.current) {
         setLatency(Math.round(performance.now() - sendTimeRef.current));
       }
-    });
+    },
+    [addEntry, setWorkspaceByInputMode]
+  );
 
-    connection.onclose(() => setIsConnected(false));
-    connection.onreconnecting(() => setIsConnected(false));
-    connection.onreconnected(() => setIsConnected(true));
-    connection.start().then(() => setIsConnected(true)).catch(() => setIsConnected(false));
+  const shouldConnectCaptionHub = useMemo(() => {
+    return flow === 'live-workspace' || flow === 'import-playback-workspace' || flow === 'processing-import';
+  }, [flow]);
 
-    return () => {
-      connection.stop();
-    };
-  }, [addEntry]);
+  const { getConnectionId } = useCaptionHub({
+    onReceiveCaption: handleReceiveCaption,
+    enabled: shouldConnectCaptionHub
+  });
 
-  const handleChunkReady = useCallback(async (audioBlob) => {
-    setStatus('processing');
-    setMicNotice({ type: 'success', message: 'Speech chunk sent' });
-    sendTimeRef.current = performance.now();
+  // live duration
+  useEffect(() => {
+    if (!sessionStart) return;
 
-    const formData = new FormData();
-    formData.append('audio', audioBlob, `chunk_${Date.now()}.wav`);
+    const id = setInterval(() => {
+      if (!sessionStartRef.current) return;
+      const delta = Math.floor((Date.now() - sessionStartRef.current.getTime()) / 1000);
+      setSessionDurationSeconds(delta);
+    }, 250);
 
-    try {
-      const response = await fetch(`${API_BASE}/api/audio/upload?translate=${translateRef.current}`, {
-        method: 'POST',
-        body: formData
-      });
+    setSessionDurationSeconds(Math.floor((Date.now() - sessionStart.getTime()) / 1000));
+    return () => clearInterval(id);
+  }, [sessionStart]);
 
-      if (!response.ok) throw new Error(await response.text());
-    } catch (error) {
-      setStatus('error');
-      setErrorMessage(error instanceof Error ? error.message : 'Audio upload failed.');
-    }
-  }, []);
+  useEffect(() => {
+    if (sessionStart == null) setSessionDurationSeconds(0);
+  }, [sessionStart]);
+
+  const handleChunkReady = useCallback(
+    async (audioBlob) => {
+      // Prevent live microphone chunk uploads during onboarding/import flows.
+      // This avoids interfering with import playback navigation and import processing.
+      if (flowRef.current !== 'live-workspace') return;
+
+      setStatus('processing');
+      setMicNotice({ type: 'success', message: 'Speech chunk sent' });
+      sendTimeRef.current = performance.now();
+
+      const formData = new FormData();
+      formData.append('audio', audioBlob, `chunk_${Date.now()}.wav`);
+
+      try {
+        const response = await fetch(
+          `${getApiBase()}/api/audio/upload?translate=${translateRef.current}`,
+          {
+            method: 'POST',
+            headers: {
+              'X-SignalR-ConnectionId': getConnectionId?.() || ''
+            },
+            body: formData
+          }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+      } catch (error) {
+        setStatus('error');
+        setErrorMessage(error instanceof Error ? error.message : 'Audio upload failed.');
+        setLatestCaption(null);
+        setReviewItems([]);
+        setMicNotice(null);
+      }
+    },
+    [getConnectionId]
+  );
 
   const {
     isRecording,
@@ -230,6 +311,8 @@ export default function App() {
 
   const startSession = useCallback(
     (sourceLabel) => {
+      clearHistory();
+
       const title = sessionPrompt.trim() || 'Untitled Session';
       setSessionTitle(title);
       setSessionSource(sourceLabel);
@@ -237,47 +320,55 @@ export default function App() {
       const now = new Date();
       setSessionStart(now);
       setSessionDurationSeconds(0);
+
       setLatestCaption(null);
+      setReviewItems([]);
       setLatency(null);
       setErrorMessage('');
       setMicNotice(null);
     },
-    [sessionPrompt]
+    [clearHistory, sessionPrompt]
   );
 
-  const handleStartRecording = useCallback(async () => {
-    startSession('Live microphone');
-    setFlow('caption-workspace');
-    pendingImportRef.current = null;
+  const isSessionNameValid = sessionPrompt.trim().length > 0;
 
-    try {
-      await startRecording(selectedDevice);
-    } catch {
-      setErrorMessage('Microphone access is required to start live recording.');
-    }
-  }, [selectedDevice, startRecording, startSession]);
+  useEffect(() => {
+    if (isSessionNameValid) setSessionNameError('');
+  }, [sessionPrompt, isSessionNameValid]);
 
-  const handleToggleRecording = useCallback(async () => {
-    if (isRecording) {
-      stopRecording();
+  const toggleInputMode = useCallback((modeId) => {
+    setSelectedInputModes((prev) => {
+      if (prev.includes(modeId)) return prev.filter((x) => x !== modeId);
+      return [...prev, modeId];
+    });
+  }, []);
+
+  const toggleUserType = useCallback((typeId) => {
+    setUserTypes((prev) => {
+      if (prev.includes(typeId)) return prev.filter((x) => x !== typeId);
+      return [...prev, typeId];
+    });
+  }, []);
+
+  const handleStartRecording = useCallback(() => {
+    if (!isSessionNameValid) {
+      setSessionNameError('Session name is required.');
       return;
     }
 
-    if (!sessionStart) {
-      startSession('Live microphone');
-    }
+    setUserTypes([]);
+    setSelectedInputModes([]);
+    setOnboardingError('');
+    setPendingAction({ type: 'mic' });
+    setCurrentInputMode('mic');
 
-    try {
-      await startRecording(selectedDevice);
-    } catch {
-      setErrorMessage('Microphone access is required to start live recording.');
-    }
-  }, [isRecording, selectedDevice, sessionStart, startRecording, startSession, stopRecording]);
+    setFlow('onboarding');
+  }, [isSessionNameValid]);
 
   const finishImport = useCallback((label, detail) => {
     setImportState({ status: 'complete', label, detail, progress: 100 });
-    setTimeout(() => setFlow('caption-workspace'), 350);
-  }, []);
+    setTimeout(() => setWorkspaceByInputMode(), 350);
+  }, [setWorkspaceByInputMode]);
 
   const failImport = useCallback((detail) => {
     setImportState({
@@ -291,16 +382,26 @@ export default function App() {
 
   const importFile = useCallback(
     async (file) => {
-      if (!isSupportedFile(file)) {
-        setFileError('Choose a supported audio or video file: .wav, .mp3, .webm, .mp4, .m4a, or .ogg.');
+      if (!isSessionNameValid) {
+        setSessionNameError('Session name is required.');
         return;
       }
 
-      setFileError('');
-      startSession(file.name);
-      setFlow('processing-import');
-      setErrorMessage('');
-      pendingImportRef.current = { label: file.name };
+      if (isRecording) stopRecording();
+
+      if (!isSupportedFile(file)) {
+        setFileError(
+          'Choose a supported audio or video file: .wav, .mp3, .webm, .mp4, .m4a, or .ogg.'
+        );
+        return;
+      }
+
+      setUserTypes([]);
+      setSelectedInputModes([]);
+      setOnboardingError('');
+      setPendingAction({ type: 'file', payload: file });
+      setCurrentInputMode('file');
+      setFlow('onboarding');
 
       setImportState({
         status: 'processing',
@@ -309,44 +410,66 @@ export default function App() {
         progress: 35
       });
 
+      pendingImportRef.current = { label: file.name };
+
       sendTimeRef.current = performance.now();
 
       const formData = new FormData();
       formData.append('media', file, file.name);
 
       try {
-        const response = await fetch(
-          `${API_BASE}/api/audio/import-file?translate=${translateRef.current}`,
-          { method: 'POST', body: formData }
-        );
+        const response = await fetch(`${getApiBase()}/api/audio/import-file?translate=${translateRef.current}`, {
+          method: 'POST',
+          headers: { 'X-SignalR-ConnectionId': getConnectionId?.() || '' },
+          body: formData
+        });
 
         if (!response.ok) throw new Error(await response.text());
+
         setImportState((current) => ({
           ...current,
           detail: 'Captions received. Opening workspace.',
           progress: 90
         }));
+
         finishImport('Import complete', file.name);
       } catch (error) {
         failImport(error instanceof Error ? error.message : 'File import failed.');
       }
     },
-    [failImport, finishImport, startSession]
+    [
+      failImport,
+      finishImport,
+      getConnectionId,
+      isRecording,
+      isSessionNameValid,
+      stopRecording
+    ]
   );
 
   const importUrl = useCallback(
     async () => {
-      const value = mediaUrl.trim();
-      if (!isSupportedUrl(value)) {
-        setUrlError('Enter a direct media URL ending in .wav, .mp3, .webm, .mp4, .m4a, or .ogg.');
+      if (!isSessionNameValid) {
+        setSessionNameError('Session name is required.');
         return;
       }
 
-      setUrlError('');
-      startSession(value);
-      setFlow('processing-import');
-      setErrorMessage('');
-      pendingImportRef.current = { label: value };
+      if (isRecording) stopRecording();
+
+      const value = mediaUrl.trim();
+      if (!isSupportedUrl(value)) {
+        setUrlError(
+          'Enter a direct media URL ending in .wav, .mp3, .webm, .mp4, .m4a, or .ogg.'
+        );
+        return;
+      }
+
+      setUserTypes([]);
+      setSelectedInputModes([]);
+      setOnboardingError('');
+      setPendingAction({ type: 'url', payload: value });
+      setCurrentInputMode('url');
+      setFlow('onboarding');
 
       setImportState({
         status: 'processing',
@@ -355,31 +478,72 @@ export default function App() {
         progress: 30
       });
 
+      pendingImportRef.current = { label: value };
+
       sendTimeRef.current = performance.now();
 
       try {
-        const response = await fetch(
-          `${API_BASE}/api/audio/import-url?translate=${translateRef.current}`,
-          {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url: value })
-          }
-        );
+        const response = await fetch(`${getApiBase()}/api/audio/import-url?translate=${translateRef.current}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-SignalR-ConnectionId': getConnectionId?.() || ''
+          },
+          body: JSON.stringify({ url: value })
+        });
 
         if (!response.ok) throw new Error(await response.text());
+
         setImportState((current) => ({
           ...current,
           detail: 'Captions received. Opening workspace.',
           progress: 90
         }));
+
         finishImport('Import complete', value);
       } catch (error) {
         failImport(error instanceof Error ? error.message : 'URL import failed.');
       }
     },
-    [failImport, finishImport, mediaUrl, startSession]
+    [
+      failImport,
+      finishImport,
+      getConnectionId,
+      isRecording,
+      isSessionNameValid,
+      mediaUrl,
+      stopRecording
+    ]
   );
+
+  const handleToggleRecording = useCallback(async () => {
+    if (isRecording) {
+      stopRecording();
+      return;
+    }
+
+    if (!sessionStart) {
+      if (!isSessionNameValid) {
+        setSessionNameError('Session name is required.');
+        return;
+      }
+      startSession('Live microphone');
+    }
+
+    try {
+      await startRecording(selectedDevice);
+    } catch {
+      setErrorMessage('Microphone access is required to start live recording.');
+    }
+  }, [
+    isRecording,
+    selectedDevice,
+    sessionStart,
+    startRecording,
+    startSession,
+    stopRecording,
+    isSessionNameValid
+  ]);
 
   const handleUpdateReview = useCallback((id, draft) => {
     setReviewItems((items) => items.map((item) => (item.id === id ? { ...item, draft } : item)));
@@ -403,11 +567,8 @@ export default function App() {
       };
       delete approvedEntry.draft;
 
-      if (item.status === 'suppressed') {
-        addEntry(approvedEntry);
-      } else {
-        updateEntry(id, approvedEntry);
-      }
+      if (item.status === 'suppressed') addEntry(approvedEntry);
+      else updateEntry(id, approvedEntry);
 
       setLatestCaption(approvedEntry);
       setReviewItems((items) => items.filter((entry) => entry.id !== id));
@@ -415,13 +576,181 @@ export default function App() {
     [addEntry, reviewItems, updateEntry]
   );
 
+
   const handleBackToLanding = useCallback(() => {
     if (isRecording) stopRecording();
+    setPendingAction(null);
+    setCurrentInputMode(null);
+
+    setUserTypes([]);
+    setOnboardingError('');
     setFlow('landing');
+
     setStatus('idle');
     setErrorMessage('');
+    setSessionNameError('');
     pendingImportRef.current = null;
   }, [isRecording, stopRecording]);
+
+  const handleOnboardingContinue = useCallback(async () => {
+    if (!userTypes.length) {
+      setOnboardingError('Select at least one user type to continue.');
+      return;
+    }
+    if (!selectedInputModes.length) {
+      setOnboardingError('Select at least one input mode to continue.');
+      return;
+    }
+
+    const action = pendingAction;
+    setOnboardingError('');
+    setPendingAction(null);
+
+    if (!action) {
+      setFlow('landing');
+      return;
+    }
+
+    if (action.type === 'mic') {
+      startSession('Live microphone');
+      setFlow('live-workspace');
+      setCurrentInputMode('mic');
+      pendingImportRef.current = null;
+
+      try {
+        await startRecording(selectedDevice);
+      } catch {
+        setErrorMessage('Microphone access is required to start live recording.');
+      }
+      return;
+    }
+
+    if (action.type === 'file') {
+      const file = action.payload;
+
+      // Session + workspace
+      startSession(file.name);
+      setFlow('processing-import');
+      setCurrentInputMode('file');
+
+      if (isRecording) stopRecording();
+      setFileError('');
+
+      setImportState({
+        status: 'processing',
+        label: `Processing ${file.name}`,
+        detail: 'Uploading media and creating captions.',
+        progress: 35
+      });
+
+      pendingImportRef.current = { label: file.name };
+
+      // kick import
+      try {
+        sendTimeRef.current = performance.now();
+        const formData = new FormData();
+        formData.append('media', file, file.name);
+
+        const response = await fetch(
+          `${getApiBase()}/api/audio/import-file?translate=${translateRef.current}`,
+          {
+            method: 'POST',
+            headers: { 'X-SignalR-ConnectionId': getConnectionId?.() || '' },
+            body: formData
+          }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+
+        setImportState((current) => ({
+          ...current,
+          detail: 'Captions received. Opening workspace.',
+          progress: 90
+        }));
+
+        finishImport('Import complete', file.name);
+      } catch (error) {
+        failImport(error instanceof Error ? error.message : 'File import failed.');
+      }
+      return;
+    }
+
+    if (action.type === 'url') {
+      const value = action.payload;
+
+      startSession(value);
+      setFlow('processing-import');
+      setCurrentInputMode('url');
+
+      if (isRecording) stopRecording();
+      setUrlError('');
+
+      setImportState({
+        status: 'processing',
+        label: 'Processing direct media URL',
+        detail: value,
+        progress: 30
+      });
+
+      pendingImportRef.current = { label: value };
+
+      try {
+        sendTimeRef.current = performance.now();
+
+        const response = await fetch(
+          `${getApiBase()}/api/audio/import-url?translate=${translateRef.current}`,
+          {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-SignalR-ConnectionId': getConnectionId?.() || ''
+            },
+            body: JSON.stringify({ url: value })
+          }
+        );
+
+        if (!response.ok) throw new Error(await response.text());
+
+        setImportState((current) => ({
+          ...current,
+          detail: 'Captions received. Opening workspace.',
+          progress: 90
+        }));
+
+        finishImport('Import complete', value);
+      } catch (error) {
+        failImport(error instanceof Error ? error.message : 'URL import failed.');
+      }
+    }
+  }, [
+    failImport,
+    finishImport,
+    getConnectionId,
+    isRecording,
+    selectedDevice,
+    selectedInputModes.length,
+    startRecording,
+    startSession,
+    stopRecording,
+    translateRef,
+    userTypes.length,
+    pendingAction
+  ]);
+
+  if (flow === 'onboarding') {
+    return (
+      <Onboarding
+        sessionTitle={sessionPrompt.trim()}
+        selectedUserTypes={userTypes}
+        onToggleType={toggleUserType}
+        selectedInputModes={selectedInputModes}
+        onToggleInputMode={toggleInputMode}
+        onBack={handleBackToLanding}
+        onContinue={handleOnboardingContinue}
+        error={onboardingError}
+      />
+    );
+  }
 
   if (flow === 'landing') {
     return (
@@ -435,6 +764,8 @@ export default function App() {
         onUrlImport={importUrl}
         fileError={fileError}
         urlError={urlError}
+        isSessionNameValid={isSessionNameValid}
+        sessionNameError={sessionNameError}
       />
     );
   }
@@ -450,15 +781,45 @@ export default function App() {
     );
   }
 
+  if (flow === 'import-playback-workspace') {
+    return (
+      <ImportPlaybackView
+        sessionTitle={sessionTitle}
+        importState={importState}
+        captions={history}
+        latestCaption={latestCaption}
+        translateEnabled={translate}
+        onBackToLanding={handleBackToLanding}
+        onUploadFile={importFile}
+        onUploadUrl={importUrl}
+        onRetryImport={() => setFlow('landing')}
+      />
+    );
+  }
+
+  if (flow === 'live-workspace') {
+    return (
+      <LiveSessionView
+        captions={history}
+        isRecording={isRecording}
+        translateEnabled={translate}
+        onToggleRecording={handleToggleRecording}
+        onToggleTranslate={() => setTranslate((value) => !value)}
+        isLive={true}
+      />
+    );
+  }
+
   return (
-    <Workstation
+    <ImportWorkspace
       sessionTitle={sessionTitle}
       sessionSource={sessionSource}
       captions={history}
       latestCaption={latestCaption || history[0]}
       isRecording={isRecording}
       status={status}
-      isConnected={isConnected}
+
+      isConnected={true}
       translate={translate}
       audioLevel={audioLevel * 100}
       isSpeaking={isSpeaking}

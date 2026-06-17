@@ -1,11 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 
-const STORAGE_KEY = 'caption_history';
-
-export function useHistory() {
+export function useHistory({ storageKey = 'caption_history' } = {}) {
   const [history, setHistory] = useState(() => {
     try {
-      const stored = localStorage.getItem(STORAGE_KEY);
+      const stored = localStorage.getItem(storageKey);
       return stored ? JSON.parse(stored) : [];
     } catch {
       return [];
@@ -14,8 +12,8 @@ export function useHistory() {
 
   // Save to localStorage whenever history changes
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(history));
-  }, [history]);
+    localStorage.setItem(storageKey, JSON.stringify(history));
+  }, [history, storageKey]);
 
   const addEntry = useCallback((entry) => {
     setHistory(prev => [entry, ...prev].slice(0, 200)); // keep last 200 entries
@@ -29,8 +27,8 @@ export function useHistory() {
 
   const clearHistory = useCallback(() => {
     setHistory([]);
-    localStorage.removeItem(STORAGE_KEY);
-  }, []);
+    localStorage.removeItem(storageKey);
+  }, [storageKey]);
 
   return { history, addEntry, updateEntry, clearHistory };
 }
