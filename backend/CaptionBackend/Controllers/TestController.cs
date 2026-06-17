@@ -18,7 +18,7 @@ public class TestController : ControllerBase
     [HttpPost("ping")]
     public async Task<IActionResult> Ping()
     {
-        await _hubContext.Clients.All.SendAsync("ReceiveTestMessage", "Hello from server!");
-        return Ok(new { message = "Broadcast sent" });
+        // Prevent cross-tab/session leakage: do not broadcast to Clients.All.
+        return Ok(new { message = "Ping received (no broadcast)" });
     }
 }

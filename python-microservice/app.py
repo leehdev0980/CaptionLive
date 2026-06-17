@@ -9,8 +9,21 @@ SUPPORTED_EXTENSIONS = {".wav", ".mp3", ".webm", ".mp4", ".m4a", ".ogg"}
 
 
 def media_suffix_from_request():
+    # WhisperClient sends filename using a base64-encoded UTF-8 header to avoid
+    # non-ASCII issues in HTTP header values.
     filename = request.headers.get("X-Filename", "")
-    _, extension = os.path.splitext(filename.lower())
+
+    if not filename:
+        b64 = request.headers.get("X-FilenameB64", "")
+        if b64:
+            try:
+                import base64
+                filename_bytes = base64.b64decode(b64)
+                filename = filename_bytes.decode("utf-8", errors="ignore")
+            except Exception:
+                filename = ""
+
+    _, extension = os.path.splitext((filename or "").lower())
     if extension in SUPPORTED_EXTENSIONS:
         return extension
     return ".wav"
@@ -41,13 +54,15 @@ def process():
         if should_translate and english:
             swahili = translate_to_swahili(english)
 
+        # Translate whole transcript; segment-level translation is optional later.
         return jsonify({
             "english": english,
             "swahili": swahili,
             "processing_time_seconds": result["processing_time_seconds"],
             "confidence": result.get("confidence", 0),
             "status": result.get("status", "review"),
-            "rejection_reason": result.get("rejection_reason", "")
+            "rejection_reason": result.get("rejection_reason", ""),
+            "segments": result.get("segments", [])
         })
     except Exception as e:
         print(f"Processing error: {e}")

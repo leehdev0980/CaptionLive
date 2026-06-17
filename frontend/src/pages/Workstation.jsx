@@ -16,7 +16,7 @@ import {
   Search,
   Subtitles,
   Trash2,
-  Upload,
+
   Wifi,
   WifiOff,
   XCircle,
@@ -27,16 +27,21 @@ import Card from '../components/Card';
 import StatusPill from '../components/StatusPill';
 import AudioMeter from '../components/AudioMeter';
 
-function formatTime(date = new Date()) {
-  return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-}
-
 function formatHMS(totalSeconds = 0) {
   const s = Math.max(0, Math.floor(totalSeconds));
   const hh = String(Math.floor(s / 3600)).padStart(2, '0');
   const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
   const ss = String(s % 60).padStart(2, '0');
   return `${hh}:${mm}:${ss}`;
+}
+
+function toSrtTime(sec) {
+  const s = Math.max(0, Number(sec) || 0);
+  const hh = String(Math.floor(s / 3600)).padStart(2, '0');
+  const mm = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
+  const ss = String(Math.floor(s % 60)).padStart(2, '0');
+  const ms = String(Math.floor((s - Math.floor(s)) * 1000)).padStart(3, '0');
+  return `${hh}:${mm}:${ss},${ms}`;
 }
 
 function countWords(captions) {
@@ -67,7 +72,8 @@ export default function Workstation({
   onApproveReview,
   onUpdateReview,
   onDiscardReview,
-  onBackToLanding
+  onBackToLanding,
+  showRecordingControls = true
 }) {
   const [query, setQuery] = useState('');
   const sessionSeconds = latestCaption?.sessionSeconds ?? sessionDurationSeconds ?? 0;
@@ -93,16 +99,21 @@ export default function Workstation({
     .reverse()
     .map(
       (caption) =>
-        `[${caption.timestamp}] EN: ${caption.english || ''}${caption.swahili ? `\nSW: ${caption.swahili}` : ''}`
+        `[${caption.timestamp}] EN: ${caption.english || ''}${
+          caption.swahili ? `\nSW: ${caption.swahili}` : ''
+        }`
     )
     .join('\n\n');
 
+  // Export transcript as plain text
   const exportTranscript = () => {
     const blob = new Blob([transcriptText], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${sessionTitle.replace(/[^\w-]+/g, '-').toLowerCase() || 'caption-session'}-transcript.txt`;
+    anchor.download = `${
+      sessionTitle.replace(/[^\w-]+/g, '-').toLowerCase() || 'caption-session'
+    }-transcript.txt`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -112,11 +123,19 @@ export default function Workstation({
       .slice()
       .reverse()
       .map((caption, index) => {
-        const start = String(index * 3).padStart(2, '0');
-        const end = String(index * 3 + 3).padStart(2, '0');
-        return `${index + 1}\n00:00:${start},000 --> 00:00:${end},000\n${caption.english || ''}${
-          caption.swahili ? `\n${caption.swahili}` : ''
-        }`;
+        const seg0 = caption?.segments?.[0];
+        const startSeconds = caption?.timestampSeconds ?? seg0?.start ?? index * 3;
+        const endSeconds =
+          seg0?.end != null
+            ? seg0.end
+            : caption?.timestampSeconds != null
+              ? caption.timestampSeconds + 3
+              : index * 3 + 3;
+
+        const english = caption.english || '';
+        const swahiliLine = caption.swahili ? `\n${caption.swahili}` : '';
+
+        return `${index + 1}\n${toSrtTime(startSeconds)} --> ${toSrtTime(endSeconds)}\n${english}${swahiliLine}`;
       })
       .join('\n\n');
 
@@ -124,7 +143,9 @@ export default function Workstation({
     const url = URL.createObjectURL(blob);
     const anchor = document.createElement('a');
     anchor.href = url;
-    anchor.download = `${sessionTitle.replace(/[^\w-]+/g, '-').toLowerCase() || 'caption-session'}.srt`;
+    anchor.download = `${
+      sessionTitle.replace(/[^\w-]+/g, '-').toLowerCase() || 'caption-session'
+    }.srt`;
     anchor.click();
     URL.revokeObjectURL(url);
   };
@@ -164,7 +185,6 @@ export default function Workstation({
           />
         </div>
 
-        {/* DEBUG: captions arriving? */}
         <div className="mx-auto mt-2 max-w-7xl text-[10px] text-[hsl(var(--muted-foreground))]">
           DEBUG captions.length={captions?.length ?? 0} latestCaption={latestCaption ? 'SET' : 'null'}
         </div>
@@ -174,9 +194,19 @@ export default function Workstation({
         <div className="space-y-4">
           <Card
             title="Caption monitor"
-            subtitle={isRecording ? 'Listening for speech' : 'Ready for recording or imported results'}
+            subtitle={
+              showRecordingControls
+                ? isRecording
+                  ? 'Listening for speech'
+                  : 'Ready for recording or imported results'
+                : 'Caption feed from imported media'
+            }
             actions={
-              <StatusPill icon={isRecording ? Radio : Clock} label={isRecording ? 'Live' : status} tone={isRecording ? 'bad' : 'muted'} />
+              <StatusPill
+                icon={showRecordingControls ? (isRecording ? Radio : Clock) : Clock}
+                label={showRecordingControls ? (isRecording ? 'Live' : status) : 'Imported'}
+                tone={showRecordingControls ? (isRecording ? 'bad' : 'muted') : 'muted'}
+              />
             }
           >
             <div className="min-h-56 rounded-lg border border-[hsl(var(--border))] bg-[hsl(var(--background))] p-5">
@@ -305,17 +335,19 @@ export default function Workstation({
         <aside className="space-y-4">
           <Card title="Controls" subtitle="Live recording and translation">
             <div className="space-y-4">
-              <button
-                type="button"
-                onClick={onToggleRecording}
-                className={clsx(
-                  'inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90',
-                  isRecording ? 'bg-[hsl(var(--destructive))]' : 'bg-[hsl(var(--success))]'
-                )}
-              >
-                {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                {isRecording ? 'Stop recording' : 'Start recording'}
-              </button>
+              {showRecordingControls && (
+                <button
+                  type="button"
+                  onClick={onToggleRecording}
+                  className={clsx(
+                    'inline-flex w-full items-center justify-center gap-2 rounded-md px-4 py-3 text-sm font-semibold text-white transition hover:opacity-90',
+                    isRecording ? 'bg-[hsl(var(--destructive))]' : 'bg-[hsl(var(--success))]'
+                  )}
+                >
+                  {isRecording ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                  {isRecording ? 'Stop recording' : 'Start recording'}
+                </button>
+              )}
 
               <button
                 type="button"
@@ -331,37 +363,43 @@ export default function Workstation({
                 Translation {translate ? 'on' : 'off'}
               </button>
 
-              <div>
-                <div className="mb-2 flex items-center justify-between text-xs text-[hsl(var(--muted-foreground))]">
-                  <span>Audio input</span>
-                  <span>{audioLevel.toFixed(0)}%</span>
-                </div>
-                <AudioMeter level={audioLevel} />
-                <div className="mt-3 flex flex-wrap gap-2">
-                  <StatusPill
-                    icon={isSpeaking ? Radio : Mic}
-                    label={isSpeaking ? 'Speech detected' : 'Listening for speech'}
-                    tone={isSpeaking ? 'good' : 'muted'}
-                  />
-                  {micNotice && (
+              {showRecordingControls && (
+                <div>
+                  <div className="mb-2 flex items-center justify-between text-xs text-[hsl(var(--muted-foreground))]">
+                    <span>Audio input</span>
+                    <span>{audioLevel.toFixed(0)}%</span>
+                  </div>
+                  <AudioMeter level={audioLevel} />
+                  <div className="mt-3 flex flex-wrap gap-2">
                     <StatusPill
-                      icon={micNotice.type === 'warning' ? AlertTriangle : CheckCircle2}
-                      label={micNotice.message}
-                      tone={micNotice.type === 'warning' ? 'warn' : 'good'}
+                      icon={isSpeaking ? Radio : Mic}
+                      label={isSpeaking ? 'Speech detected' : 'Listening for speech'}
+                      tone={isSpeaking ? 'good' : 'muted'}
                     />
+                    {micNotice && (
+                      <StatusPill
+                        icon={micNotice.type === 'warning' ? AlertTriangle : CheckCircle2}
+                        label={micNotice.message}
+                        tone={micNotice.type === 'warning' ? 'warn' : 'good'}
+                      />
+                    )}
+                  </div>
+                  {latency !== null && (
+                    <div className="mt-3">
+                      <StatusPill icon={Zap} label={`${latency}ms last response`} tone="good" />
+                    </div>
                   )}
-                </div>
-              </div>
 
-              {latency !== null && <StatusPill icon={Zap} label={`${latency}ms last response`} tone="good" />}
-
-              {errorMessage && (
-                <div className="rounded-md border border-[hsl(var(--destructive))]/30 bg-[hsl(var(--destructive))]/10 p-3 text-sm text-[hsl(var(--destructive))]">
-                  {errorMessage}
+                  {errorMessage && (
+                    <div className="rounded-md border border-[hsl(var(--destructive))]/30 bg-[hsl(var(--destructive))]/10 p-3 text-sm text-[hsl(var(--destructive))]">
+                      {errorMessage}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
           </Card>
+
 
           <div className="grid grid-cols-2 gap-3">
             <Card>
@@ -491,3 +529,4 @@ export default function Workstation({
     </main>
   );
 }
+

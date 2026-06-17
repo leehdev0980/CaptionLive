@@ -42,8 +42,18 @@ public class AudioController : ControllerBase
         {
             var result = await _whisperClient.TranscribeAsync(bytes, translate, audio.FileName, audio.ContentType);
 
-            // Broadcast to all connected React clients via SignalR
-            await _hubContext.Clients.All.SendAsync("ReceiveCaption", result.English, result.Swahili, ToClientMetadata(result, audio.FileName));
+            var targetConnectionId = Request.Headers["X-SignalR-ConnectionId"].ToString();
+
+            if (!string.IsNullOrWhiteSpace(targetConnectionId))
+            {
+                await _hubContext.Clients.Client(targetConnectionId).SendAsync(
+                    "ReceiveCaption",
+                    result.English,
+                    result.Swahili,
+                    ToClientMetadata(result, audio.FileName)
+                );
+            }
+            // If connection id is missing, do not broadcast (prevents cross-tab/session leakage).
 
             return Ok(ToApiResponse(result, audio.FileName));
         }
@@ -74,7 +84,19 @@ public class AudioController : ControllerBase
         try
         {
             var result = await _whisperClient.TranscribeAsync(bytes, translate, media.FileName, media.ContentType);
-            await _hubContext.Clients.All.SendAsync("ReceiveCaption", result.English, result.Swahili, ToClientMetadata(result, media.FileName));
+
+            var targetConnectionId = Request.Headers["X-SignalR-ConnectionId"].ToString();
+
+            if (!string.IsNullOrWhiteSpace(targetConnectionId))
+            {
+                await _hubContext.Clients.Client(targetConnectionId).SendAsync(
+                    "ReceiveCaption",
+                    result.English,
+                    result.Swahili,
+                    ToClientMetadata(result, media.FileName)
+                );
+            }
+            // If connection id is missing, do not broadcast (prevents cross-tab/session leakage).
 
             return Ok(ToApiResponse(result, media.FileName));
         }
@@ -116,7 +138,19 @@ public class AudioController : ControllerBase
         try
         {
             var result = await _whisperClient.TranscribeAsync(bytes, translate, fileName, contentType);
-            await _hubContext.Clients.All.SendAsync("ReceiveCaption", result.English, result.Swahili, ToClientMetadata(result, request.Url));
+
+            var targetConnectionId = Request.Headers["X-SignalR-ConnectionId"].ToString();
+
+            if (!string.IsNullOrWhiteSpace(targetConnectionId))
+            {
+                await _hubContext.Clients.Client(targetConnectionId).SendAsync(
+                    "ReceiveCaption",
+                    result.English,
+                    result.Swahili,
+                    ToClientMetadata(result, request.Url)
+                );
+            }
+            // If connection id is missing, do not broadcast (prevents cross-tab/session leakage).
 
             return Ok(ToApiResponse(result, request.Url));
         }
@@ -138,15 +172,31 @@ public class AudioController : ControllerBase
 
     private static object ToClientMetadata(TranscriptionResult result, string source)
     {
+        // Use the last segment timing as the caption timestamp for now.
+        var last = result.Segments?.Count > 0 ? result.Segments[^1] : null;
+        var timestampSeconds = last != null ? last.End : 0;
+
         return new
         {
             confidence = result.Confidence,
             status = result.Status,
             rejectionReason = result.RejectionReason,
             processingTimeSeconds = result.ProcessingTimeSeconds,
-            source
+            source,
+            timestampSeconds,
+            timestamp = timestampSeconds > 0 ? FormatTimestamp(timestampSeconds) : ""
         };
     }
+
+    private static string FormatTimestamp(double seconds)
+    {
+        var s = Math.Max(0, seconds);
+        var hh = (int)(s / 3600);
+        var mm = (int)((s % 3600) / 60);
+        var ss = (int)(s % 60);
+        return $"{hh:00}:{mm:00}:{ss:00}";
+    }
+
 
     private static object ToApiResponse(TranscriptionResult result, string source)
     {
@@ -158,9 +208,13 @@ public class AudioController : ControllerBase
             status = result.Status,
             rejectionReason = result.RejectionReason,
             processingTimeSeconds = result.ProcessingTimeSeconds,
-            source
+            source,
+            timestampSeconds = result.Segments?.Count > 0 ? result.Segments[^1].End : 0,
+            timestamp = result.Segments?.Count > 0 ? FormatTimestamp(result.Segments[^1].End) : "",
+            segments = result.Segments
         };
     }
+
 }
 
 public sealed record MediaUrlRequest(string Url);

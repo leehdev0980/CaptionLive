@@ -6,6 +6,7 @@ public class CaptionHub : Hub
 {
     public async Task SendTestMessage(string message)
     {
-        await Clients.All.SendAsync("ReceiveTestMessage", $"Echo: {message}");
+        // Prevent cross-tab/session leakage: do not broadcast to Clients.All.
+        await Clients.Caller.SendAsync("ReceiveTestMessage", $"Echo: {message}");
     }
 }

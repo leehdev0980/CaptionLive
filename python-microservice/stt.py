@@ -57,16 +57,30 @@ def transcribe_audio(audio_bytes: bytes, suffix: str = ".wav") -> dict:
             hallucination_silence_threshold=1.0
         )
         segments = list(segments)
-        text = " ".join(seg.text.strip() for seg in segments)
+
+        # Whisper segments already contain timing.
+        segment_payload = [
+            {
+                "start": float(getattr(seg, "start", 0.0)),
+                "end": float(getattr(seg, "end", 0.0)),
+                "text": (seg.text or "").strip()
+            }
+            for seg in segments
+        ]
+
+        # Still produce a single combined transcript for legacy UI.
+        text = " ".join(seg["text"] for seg in segment_payload if seg["text"])
         confidence = calculate_confidence(segments)
         status, rejection_reason = classify_transcript(text, confidence, segments)
         processing_time = round(time.time() - start_time, 2)
+
         return {
             "english": text.strip(),
             "processing_time_seconds": processing_time,
             "confidence": confidence,
             "status": status,
-            "rejection_reason": rejection_reason
+            "rejection_reason": rejection_reason,
+            "segments": segment_payload
         }
     finally:
         if os.path.exists(wav_path):
