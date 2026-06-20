@@ -1,12 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import * as signalR from '@microsoft/signalr';
+import { useSessionStore } from './stores/sessionStore';
 
 import Homepage from './pages/Homepage';
 import ProcessingView from './pages/ProcessingView';
 import Workstation from './pages/Workstation';
 
 import { useAudioAnalyzer } from './hooks/useAudioAnalyzer';
-import { useHistory } from './hooks/useHistory';
 
 const API_BASE = 'http://localhost:5260';
 const SUPPORTED_MEDIA_EXTENSIONS = ['.wav', '.mp3', '.webm', '.mp4', '.m4a', '.ogg'];
@@ -47,16 +47,29 @@ function formatTime(date = new Date()) {
 }
 
 export default function App() {
+  const {
+    status,
+    isRecording,
+    isConnected,
+    latency,
+    history,
+    setStatus,
+    setIsRecording,
+    setIsConnected,
+    setLatency,
+    addHistory,
+    setTranscript,
+    setTranslation,
+    resetSession,
+    toggleTranslate,
+    clearHistory
+  } = useSessionStore();
+
   const [flow, setFlow] = useState('landing');
   const [sessionPrompt, setSessionPrompt] = useState('');
   const [sessionTitle, setSessionTitle] = useState('Untitled Session');
   const [sessionSource, setSessionSource] = useState('Live microphone');
   const [sessionStart, setSessionStart] = useState(null);
-  const [latestCaption, setLatestCaption] = useState(null);
-  const [translate, setTranslate] = useState(true);
-  const [status, setStatus] = useState('idle');
-  const [isConnected, setIsConnected] = useState(false);
-  const [latency, setLatency] = useState(null);
   const [errorMessage, setErrorMessage] = useState('');
   const [micNotice, setMicNotice] = useState(null);
   const [mediaUrl, setMediaUrl] = useState('');
@@ -72,14 +85,13 @@ export default function App() {
 
   const [sessionDurationSeconds, setSessionDurationSeconds] = useState(0);
 
+  const translate = useSessionStore(state => state.translate);
   const translateRef = useRef(translate);
   const sendTimeRef = useRef(null);
   const pendingImportRef = useRef(null);
   const flowRef = useRef(flow);
   const sessionSourceRef = useRef(sessionSource);
   const sessionStartRef = useRef(sessionStart);
-
-  const { history, addEntry, updateEntry, clearHistory } = useHistory();
 
   useEffect(() => {
     translateRef.current = translate;
@@ -159,8 +171,9 @@ export default function App() {
         setReviewItems((items) => [{ ...entry, draft: entry.english || '' }, ...items].slice(0, 20));
       }
 
-      setLatestCaption(entry);
-      addEntry(entry);
+      setTranscript(english, now);
+      setTranslation(swahili, now);
+      addHistory(entry);
       setStatus('ready');
       setErrorMessage('');
       setMicNotice({
@@ -182,7 +195,7 @@ export default function App() {
     return () => {
       connection.stop();
     };
-  }, [addEntry]);
+  }, [addHistory, setStatus, setLatency, setTranscript, setTranslation, setIsConnected]);
 
   const handleChunkReady = useCallback(async (audioBlob) => {
     setStatus('processing');
@@ -203,10 +216,9 @@ export default function App() {
       setStatus('error');
       setErrorMessage(error instanceof Error ? error.message : 'Audio upload failed.');
     }
-  }, []);
+  }, [setStatus]);
 
   const {
-    isRecording,
     audioLevel,
     isSpeaking,
     selectedDevice,
@@ -221,7 +233,10 @@ export default function App() {
       });
       setStatus('listening');
     },
-    onRecordingStateChange: (recording) => setStatus(recording ? 'listening' : 'ready'),
+    onRecordingStateChange: (recording) => {
+        setIsRecording(recording);
+        setStatus(recording ? 'listening' : 'ready');
+    },
     chunkDurationMs: 4500,
     minSpeechMs: 650,
     fftSize: 256,
@@ -237,12 +252,11 @@ export default function App() {
       const now = new Date();
       setSessionStart(now);
       setSessionDurationSeconds(0);
-      setLatestCaption(null);
-      setLatency(null);
+      resetSession();
       setErrorMessage('');
       setMicNotice(null);
     },
-    [sessionPrompt]
+    [sessionPrompt, resetSession]
   );
 
   const handleStartRecording = useCallback(async () => {
@@ -404,15 +418,16 @@ export default function App() {
       delete approvedEntry.draft;
 
       if (item.status === 'suppressed') {
-        addEntry(approvedEntry);
+        addHistory(approvedEntry);
       } else {
-        updateEntry(id, approvedEntry);
+        // This is a simplified approach. A more robust solution would involve a unique ID.
+        const newHistory = history.map(h => h.id === id ? approvedEntry : h);
+        useSessionStore.setState({ history: newHistory });
       }
 
-      setLatestCaption(approvedEntry);
       setReviewItems((items) => items.filter((entry) => entry.id !== id));
     },
-    [addEntry, reviewItems, updateEntry]
+    [addHistory, reviewItems, history]
   );
 
   const handleBackToLanding = useCallback(() => {
@@ -421,7 +436,7 @@ export default function App() {
     setStatus('idle');
     setErrorMessage('');
     pendingImportRef.current = null;
-  }, [isRecording, stopRecording]);
+  }, [isRecording, stopRecording, setStatus]);
 
   if (flow === 'landing') {
     return (
@@ -455,7 +470,7 @@ export default function App() {
       sessionTitle={sessionTitle}
       sessionSource={sessionSource}
       captions={history}
-      latestCaption={latestCaption || history[0]}
+      latestCaption={history[history.length - 1]} // Corrected prop
       isRecording={isRecording}
       status={status}
       isConnected={isConnected}
@@ -468,8 +483,8 @@ export default function App() {
       reviewItems={reviewItems}
       sessionDurationSeconds={sessionDurationSeconds}
       onToggleRecording={handleToggleRecording}
-      onToggleTranslate={() => setTranslate((value) => !value)}
-      onClearHistory={clearHistory}
+      onToggleTranslate={toggleTranslate} // Use store action
+      onClearHistory={clearHistory} // Use store action
       onApproveReview={handleApproveReview}
       onUpdateReview={handleUpdateReview}
       onDiscardReview={handleDiscardReview}
