@@ -1,35 +1,57 @@
-using System.Net.Http;
 using System.Text.Json;
+using Microsoft.Extensions.Options;
 
 namespace CaptionBackend.Services;
 
 public class WhisperClient
 {
     private readonly HttpClient _httpClient;
+    private readonly WhisperOptions _options;
 
-    // HttpClient is injected via constructor (typed client)
-    public WhisperClient(HttpClient httpClient)
+    public WhisperClient(HttpClient httpClient, IOptions<WhisperOptions> options)
     {
         _httpClient = httpClient;
+        _options = options.Value;
     }
 
     /// <summary>
     /// Sends audio bytes to Python and returns the English transcription.
+    /// This method is intentionally defensive: decode/transcribe failures should not crash the ASP.NET endpoint.
     /// </summary>
-    public async Task<string> TranscribeAsync(byte[] audioBytes)
+    public async Task<string> TranscribeAsync(byte[] audioBytes, CancellationToken cancellationToken = default)
     {
-        // Prepare the request body as raw bytes with the correct MIME type
-        using var content = new ByteArrayContent(audioBytes);
-        content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("audio/wav");
+        try
+        {
+            // Prepare the request body as raw bytes.
+            // MediaRecorder produces opus-in-container bytes (webm/ogg), so don't force audio/wav content-type.
+            using var content = new ByteArrayContent(audioBytes);
+            content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
 
-        // Call the Python microservice
-        var response = await _httpClient.PostAsync("http://localhost:5001/process", content);
-        response.EnsureSuccessStatusCode(); // throws if not 2xx
+            var response = await _httpClient.PostAsync(_options.ProcessPath, content, cancellationToken);
 
-        var jsonString = await response.Content.ReadAsStringAsync();
-        
-        // Parse the JSON to extract the "english" field
-        using var doc = JsonDocument.Parse(jsonString);
-        return doc.RootElement.GetProperty("english").GetString() ?? "";
+            if (!response.IsSuccessStatusCode)
+            {
+                // Consume the body to avoid socket exhaustion issues and return empty transcript.
+                _ = await response.Content.ReadAsStringAsync(cancellationToken);
+                return string.Empty;
+            }
+
+            var jsonString = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            // Parse the JSON to extract the "english" field
+            using var doc = JsonDocument.Parse(jsonString);
+            return doc.RootElement.TryGetProperty("english", out var englishElement)
+                ? englishElement.GetString() ?? string.Empty
+                : string.Empty;
+        }
+        catch (Exception ex) when (
+            ex is HttpRequestException ||
+            ex is TaskCanceledException ||
+            ex is JsonException ||
+            ex is InvalidOperationException)
+        {
+            Console.WriteLine($"WhisperClient error: {ex.Message}");
+            return string.Empty;
+        }
     }
 }

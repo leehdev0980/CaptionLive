@@ -12,3 +12,8 @@
 **/node_modules/
 dist/
 .env
+
+# Test / generated audio files
+python-microservice/*.mp3
+python-microservice/*.wav
+python-microservice/*.webm
