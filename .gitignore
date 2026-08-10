@@ -17,3 +17,5 @@ dist/
 python-microservice/*.mp3
 python-microservice/*.wav
 python-microservice/*.webm
+.vercel
+.env*
